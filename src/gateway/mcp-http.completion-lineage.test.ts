@@ -122,6 +122,14 @@ async function reparentChild() {
   clearSessionStoreCacheForTest();
 }
 
+async function reownChild() {
+  await replaceSessionEntry(
+    { agentId: "main", sessionKey: childKey },
+    { ...childEntry, completionOwnerSessionKey: "agent:main:direct:another-requester" },
+  );
+  clearSessionStoreCacheForTest();
+}
+
 /** Mints the grant a verified Claude CLI completion turn holds and binds its capture. */
 async function mintCompletionGrant(runId: string) {
   const runtime = getActiveMcpLoopbackRuntime();
@@ -239,13 +247,39 @@ describe("MCP loopback completion lineage at the final tool-effect fence", () =>
     expect(grant.outcomes).toMatchObject([{ toolName: "write", outcome: "completed" }]);
   });
 
+  it("lets the completion owner write when another session controls the child", async () => {
+    // The persisted completion owner, when set, is the lineage; the controller is not.
+    await seedLineage({
+      spawnedBy: "agent:main:direct:controller",
+      completionOwnerSessionKey: requesterKey,
+    });
+    const grant = await mintCompletionGrant("lineage-completion-owner");
+
+    const response = await grant.request("tools/call");
+
+    expect(await response.json()).toMatchObject({ result: { isError: false } });
+    expect(await grant.written()).toBe("lineage-completion-owner");
+  });
+
   it.each([
     { name: "removed", runId: "lineage-removed-in-hook", revoke: removeChild },
     { name: "re-parented", runId: "lineage-reparented-in-hook", revoke: reparentChild },
-  ])(
+    {
+      name: "handed to another completion owner",
+      runId: "lineage-reowned-in-hook",
+      seed: { completionOwnerSessionKey: requesterKey },
+      revoke: reownChild,
+    },
+  ] satisfies Array<{
+    name: string;
+    runId: string;
+    seed?: Partial<SessionEntry>;
+    revoke: () => Promise<void>;
+  }>)(
     "rejects the write when the child lineage is $name during an awaited before-tool hook",
-    async ({ runId, revoke }) => {
-      await seedLineage();
+    async (testCase) => {
+      const { runId, revoke } = testCase;
+      await seedLineage("seed" in testCase ? testCase.seed : undefined);
       const grant = await mintCompletionGrant(runId);
       // The tool list resolves while the lineage still verifies.
       await (await grant.request("tools/list")).body?.cancel();
