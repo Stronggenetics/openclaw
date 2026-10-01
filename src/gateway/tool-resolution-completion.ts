@@ -24,11 +24,7 @@ export function staleCompletionGrantError(): Error {
   return new Error("CLI completion tool grant no longer matches its requester policy");
 }
 
-/**
- * Re-verifies a completion grant's requester lineage. Tool resolution checks it when it
- * builds a tool list; cached lists need the same check before they are served again.
- */
-export function assertCompletionGrantLineage(params: {
+type CompletionGrantLineageParams = {
   cfg: OpenClawConfig;
   context: Pick<
     McpLoopbackRequestContext,
@@ -40,11 +36,19 @@ export function assertCompletionGrantLineage(params: {
     | "inputProvenance"
     | "trustedInternalHandoff"
   >;
-}): void {
+};
+
+/**
+ * Whether a completion grant's requester lineage still verifies. Grants without a
+ * handoff carry no lineage and are always current. The child entry can be removed or
+ * re-parented while a tool call awaits preparation, hooks or approvals, so the tool
+ * list, the dispatch authorization and the tool's source-effect guard all ask this.
+ */
+export function isCompletionGrantLineageCurrent(params: CompletionGrantLineageParams): boolean {
   const { context } = params;
-  if (
-    context.trustedInternalHandoff &&
-    !hasVerifiedRequesterCompletionHandoff({
+  return (
+    !context.trustedInternalHandoff ||
+    hasVerifiedRequesterCompletionHandoff({
       config: params.cfg,
       sessionKey: context.runtimePolicySessionKey?.trim() || context.sessionKey,
       sessionId: context.sessionId,
@@ -53,7 +57,12 @@ export function assertCompletionGrantLineage(params: {
       inputProvenance: context.inputProvenance,
       trustedInternalHandoff: context.trustedInternalHandoff,
     })
-  ) {
+  );
+}
+
+/** Rejects a tool list, built or cached, whose completion grant outlived its lineage. */
+export function assertCompletionGrantLineage(params: CompletionGrantLineageParams): void {
+  if (!isCompletionGrantLineageCurrent(params)) {
     throw staleCompletionGrantError();
   }
 }
