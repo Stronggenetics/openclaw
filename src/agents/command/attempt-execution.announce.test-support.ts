@@ -183,14 +183,11 @@ const SUBAGENT_ANNOUNCE_DELIVERY_CASES: readonly SubagentAnnounceDeliveryCase[] 
   },
 ];
 
-// Claude CLI completions keep the requester tools wherever the embedded runner
-// would: automatic replies, or a message tool that survives every policy.
+// Only automatic Claude CLI completion replies restore requester tools.
 function createClaudeCliSubagentAnnounceDeliveryCases(): SubagentAnnounceDeliveryCase[] {
   return SUBAGENT_ANNOUNCE_DELIVERY_CASES.map((testCase) => {
     const retainsRequesterTools =
-      testCase.sourceReplyDeliveryMode === "automatic"
-        ? testCase.trustedInternalHandoff !== false
-        : !testCase.expectedDisableTools;
+      testCase.sourceReplyDeliveryMode === "automatic" && testCase.trustedInternalHandoff !== false;
     return retainsRequesterTools
       ? {
           ...testCase,

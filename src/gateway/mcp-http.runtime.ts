@@ -358,10 +358,10 @@ export class McpLoopbackToolCache {
     const resolved = await resolvePairedComputerNodeScope(nodeExecParams, "exact");
     input.signal?.throwIfAborted();
     const { params } = resolved;
+    assertCompletionGrantLineage(input);
     const cacheKey = buildMcpLoopbackToolCacheKey(params);
     const cached = this.#entries.get(cacheKey, params.cfg);
     if (cached) {
-      assertCompletionGrantLineage(input);
       return cached;
     }
 

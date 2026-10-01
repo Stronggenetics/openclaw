@@ -82,10 +82,9 @@ import { resolveHarnessAuthProfileSelection } from "./attempt-auth-selection.js"
 import { emitAgentAttemptRuntimeStart } from "./attempt-callbacks.js";
 import {
   buildClaudeCliFallbackContextPrelude,
-  claudeCliMediatesCompletionTools,
-  claudeCliSessionTranscriptHasContent,
-  fallbackRetryLeavesClaudeCli,
+  resolveCompletionToolPolicy,
   isClaudeCliProvider,
+  claudeCliSessionTranscriptHasContent,
   resolveFallbackRetryPrompt,
   rebaseExecApprovalContinuationPromptRange,
 } from "./attempt-execution.helpers.js";
@@ -245,11 +244,15 @@ export function runAgentAttempt(
     completionToolPolicies !== undefined &&
     isToolAllowedByPolicies("message", Object.values(completionToolPolicies)) &&
     isRuntimeToolAllowed("message", params.opts.toolsAllow);
-  const claudeCliFallbackPrelude = fallbackRetryLeavesClaudeCli(params, isRawModelRun)
-    ? buildClaudeCliFallbackContextPrelude({
-        cliSessionId: getCliSessionBinding(params.sessionEntry, "claude-cli")?.sessionId,
-      })
-    : "";
+  const claudeCliFallbackPrelude =
+    !isRawModelRun &&
+    params.isFallbackRetry &&
+    isClaudeCliProvider(params.originalProvider) &&
+    !isClaudeCliProvider(params.providerOverride)
+      ? buildClaudeCliFallbackContextPrelude({
+          cliSessionId: getCliSessionBinding(params.sessionEntry, "claude-cli")?.sessionId,
+        })
+      : "";
   const resolvedPrompt = resolveFallbackRetryPrompt({
     body: params.body,
     isFallbackRetry: params.isFallbackRetry,
@@ -293,25 +296,16 @@ export function runAgentAttempt(
         sessionRuntimeOverride,
         pinnedHarnessId,
       });
-  // Claude CLI enforces the requester's cap through its mediated MCP tools.
-  // Other CLI runtimes and node-hosted Claude cannot, so they stay tool-free.
-  const completionRetainsRequesterTools =
-    trustedSubagentAnnounceHandoff &&
-    !isRawModelRun &&
-    (!isCliExecutionProvider || claudeCliMediatesCompletionTools(cliExecutionProvider, params)) &&
-    (!messageToolOwnsVisibleReply(params.opts) || completionNeedsMessageDelivery);
-  // Message-tool-only delivery constrains the visible reply, not the parent
-  // continuation's verified authority. Keep the inherited cap while requiring
-  // message to survive every applicable policy before enabling any tools.
-  // An explicit cap is enforced even when tools are disabled; clear it so a
-  // denied completion can finish tool-free and its owner can relay frozen text.
-  const runtimeToolsAllow = isSubagentAnnounceHandoff
-    ? completionRetainsRequesterTools
-      ? params.opts.toolsAllow
-      : completionNeedsMessageDelivery
-        ? ["message"]
-        : undefined
-    : params.opts.toolsAllow;
+  const { completionRetainsRequesterTools, runtimeToolsAllow, disableTools } =
+    resolveCompletionToolPolicy({
+      run: params,
+      trustedSubagentAnnounceHandoff,
+      isSubagentAnnounceHandoff,
+      isRawModelRun,
+      isCliExecutionProvider,
+      cliExecutionProvider,
+      completionNeedsMessageDelivery,
+    });
   // Collector output is mandatory result transport, even on a narrowed tool
   // surface. The CLI grant is minted from this list and enforced exactly on the
   // loopback server, so a plugin-launched or cron-continued collector needs the
@@ -322,11 +316,6 @@ export function runAgentAttempt(
         ? ["structured_output"]
         : undefined,
   });
-  const disableTools =
-    params.opts.modelRun === true ||
-    (isSubagentAnnounceHandoff &&
-      !completionRetainsRequesterTools &&
-      !completionNeedsMessageDelivery);
   const toolContext = {
     messageChannel: params.messageChannel,
     messageProvider: params.opts.messageProvider ?? params.messageChannel,

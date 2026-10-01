@@ -107,84 +107,75 @@ describe("trusted completion tool preparation", () => {
     cliBackendsTesting.resetDepsForTest();
   });
 
-  it.each(["automatic", "message_tool_only"] as const)(
-    "mediates trusted completion tools with persisted requester policy: %s",
-    async (sourceReplyDeliveryMode) => {
-      const { sessionTarget } = fixture.session;
-      const childSessionKey = "agent:main:subagent:completion-review";
-      const inheritedToolDeny = ["terminal", "gateway", "write", "edit", "apply_patch"];
-      replaceSessionEntrySync(
-        { storePath: sessionTarget.storePath, sessionKey: childSessionKey },
-        {
-          sessionId: "completion-child",
-          updatedAt: 1,
-          spawnedBy: sessionTarget.sessionKey,
-          spawnDepth: 1,
-          subagentRole: "orchestrator",
-          subagentControlScope: "children",
-          inheritedToolPolicyVersion: 1,
-          inheritedToolDeny,
-          ...(sourceReplyDeliveryMode === "message_tool_only"
-            ? { inheritedToolAllow: ["read", "exec"] }
-            : {}),
-        },
-      );
-      const trustedInternalHandoff = {
-        kind: "subagent-completion" as const,
+  it("mediates trusted completion tools with persisted requester policy", async () => {
+    const { sessionTarget } = fixture.session;
+    const childSessionKey = "agent:main:subagent:completion-review";
+    const inheritedToolDeny = ["terminal", "gateway", "write", "edit", "apply_patch"];
+    replaceSessionEntrySync(
+      { storePath: sessionTarget.storePath, sessionKey: childSessionKey },
+      {
+        sessionId: "completion-child",
+        updatedAt: 1,
+        spawnedBy: sessionTarget.sessionKey,
+        spawnDepth: 1,
+        subagentRole: "orchestrator",
+        subagentControlScope: "children",
+        inheritedToolPolicyVersion: 1,
+        inheritedToolDeny,
+        inheritedToolAllow: ["read", "exec", "write"],
+      },
+    );
+    const trustedInternalHandoff = {
+      kind: "subagent-completion" as const,
+      sourceSessionKey: childSessionKey,
+      sourceSessionId: "completion-child",
+      targetSessionKey: sessionTarget.sessionKey,
+      targetSessionId: sessionTarget.sessionId,
+      provider: "claude-cli",
+      model: "opus",
+    };
+    const context = await fixture.prepare({
+      sessionKey: sessionTarget.sessionKey,
+      sessionId: sessionTarget.sessionId,
+      provider: "claude-cli",
+      model: "opus",
+      modelHasVision: false,
+      sourceReplyDeliveryMode: "automatic",
+      trustedInternalHandoff,
+      inputProvenance: {
+        kind: "inter_session",
+        sourceTool: "subagent_announce",
         sourceSessionKey: childSessionKey,
-        sourceSessionId: "completion-child",
-        targetSessionKey: sessionTarget.sessionKey,
-        targetSessionId: sessionTarget.sessionId,
-        provider: "claude-cli",
-        model: "opus",
-      };
-      const context = await fixture.prepare({
-        sessionKey: sessionTarget.sessionKey,
-        sessionId: sessionTarget.sessionId,
-        provider: "claude-cli",
-        model: "opus",
-        modelHasVision: false,
-        sourceReplyDeliveryMode,
-        trustedInternalHandoff,
-        inputProvenance: {
-          kind: "inter_session",
-          sourceTool: "subagent_announce",
-          sourceSessionKey: childSessionKey,
+      },
+      config: {
+        session: { store: sessionTarget.storePath },
+        tools: {
+          toolsBySender: { "*": { deny: ["group:runtime", "group:fs"] } },
         },
-        config: {
-          session: { store: sessionTarget.storePath },
-          tools: {
-            toolsBySender: { "*": { deny: ["group:runtime", "group:fs"] } },
-            ...(sourceReplyDeliveryMode === "message_tool_only" ? { allow: ["read", "exec"] } : {}),
-          },
-          mcp: { servers: { userProbe: { command: "node", args: ["user-probe.mjs"] } } },
-        },
-      });
-      try {
-        const grant = mintGrant.mock.calls[0]?.[0]?.context;
-        expect(grant).toBeDefined();
-        expect(context.params.cliToolAvailability?.native).toEqual([]);
-        expect(grant?.toolsAllow).toEqual(expect.arrayContaining(["read", "exec"]));
-        expect(grant?.toolsAllow).toEqual(context.params.cliToolAvailability?.openClaw);
-        for (const denied of inheritedToolDeny) {
-          expect(grant?.toolsAllow).not.toContain(denied);
-        }
-        expect(grant?.trustedInternalHandoff).toEqual(trustedInternalHandoff);
-        if (sourceReplyDeliveryMode === "message_tool_only") {
-          expect(grant?.toolsAllow?.toSorted()).toEqual(["exec", "message", "read"]);
-          expect(grant?.sourceReplyOnly).toBe(true);
-        }
-        const args = context.preparedBackend.backend.args ?? [];
-        const mcpConfigPath = args[args.indexOf("--mcp-config") + 1];
-        const bundle = JSON.parse(fs.readFileSync(mcpConfigPath ?? "", "utf-8")) as {
-          mcpServers: Record<string, unknown>;
-        };
-        expect(Object.keys(bundle.mcpServers)).toEqual(["openclaw"]);
-      } finally {
-        await context.preparedBackend.cleanup?.();
+        mcp: { servers: { userProbe: { command: "node", args: ["user-probe.mjs"] } } },
+      },
+    });
+    try {
+      const grant = mintGrant.mock.calls[0]?.[0]?.context;
+      expect(grant).toBeDefined();
+      expect(context.params.cliToolAvailability?.native).toEqual([]);
+      expect(grant?.toolsAllow).toEqual(expect.arrayContaining(["read", "exec"]));
+      expect(grant?.toolsAllow).toEqual(context.params.cliToolAvailability?.openClaw);
+      for (const denied of inheritedToolDeny) {
+        expect(grant?.toolsAllow).not.toContain(denied);
       }
-    },
-  );
+      expect(grant?.trustedInternalHandoff).toEqual(trustedInternalHandoff);
+      expect(grant?.toolsAllow?.toSorted()).toEqual(["exec", "read"]);
+      const args = context.preparedBackend.backend.args ?? [];
+      const mcpConfigPath = args[args.indexOf("--mcp-config") + 1];
+      const bundle = JSON.parse(fs.readFileSync(mcpConfigPath ?? "", "utf-8")) as {
+        mcpServers: Record<string, unknown>;
+      };
+      expect(Object.keys(bundle.mcpServers)).toEqual(["openclaw"]);
+    } finally {
+      await context.preparedBackend.cleanup?.();
+    }
+  });
 
   it.each([
     {

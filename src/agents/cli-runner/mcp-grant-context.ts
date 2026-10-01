@@ -186,8 +186,8 @@ export function buildCliMcpGrantContext(params: {
     params.run.inputProvenance?.kind === "inter_session" &&
     params.run.inputProvenance.sourceTool === "subagent_announce" &&
     params.run.sourceReplyDeliveryMode === "message_tool_only" &&
-    (params.run.trustedInternalHandoff !== undefined ||
-      (grantedToolsAllow?.length === 1 && grantedToolsAllow[0] === "message"));
+    grantedToolsAllow?.length === 1 &&
+    grantedToolsAllow[0] === "message";
   return {
     sessionKey,
     ...(params.run.trustedInternalHandoff

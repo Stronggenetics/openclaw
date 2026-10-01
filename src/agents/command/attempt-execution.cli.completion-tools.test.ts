@@ -30,7 +30,6 @@ import {
   resetCliAttemptFixtureDatabases,
   type RunAgentAttemptOverrides,
 } from "./attempt-execution.cli.test-support.js";
-import { claudeCliMediatesCompletionTools } from "./attempt-execution.helpers.js";
 import { runAgentAttempt as runAgentAttemptImpl } from "./attempt-execution.js";
 
 const runCliAgentMock = vi.hoisted(() => vi.fn());
@@ -245,44 +244,6 @@ describe("CLI completion tool handoffs", () => {
     },
   );
 
-  it("limits mediated completion tools to a locally hosted Claude CLI announce", () => {
-    const local = { sessionEntry: makeSessionEntry("openclaw-session-local"), opts: {} };
-    const handoff: TrustedHandoff = {
-      kind: "subagent-completion",
-      sourceSessionKey: "agent:main:subagent:child",
-      targetSessionKey: "agent:main:direct:requester",
-      targetSessionId: local.sessionEntry.sessionId,
-      provider: "claude-cli",
-      model: "opus",
-    };
-
-    expect(claudeCliMediatesCompletionTools("claude-cli", local)).toBe(true);
-    expect(
-      claudeCliMediatesCompletionTools("claude-cli", {
-        ...local,
-        opts: { trustedInternalHandoff: handoff },
-      }),
-    ).toBe(true);
-    expect(claudeCliMediatesCompletionTools("google-gemini-cli", local)).toBe(false);
-    expect(
-      claudeCliMediatesCompletionTools("claude-cli", {
-        ...local,
-        sessionEntry: { ...local.sessionEntry, execHost: "node" },
-      }),
-    ).toBe(false);
-    expect(
-      claudeCliMediatesCompletionTools("claude-cli", {
-        ...local,
-        opts: {
-          trustedInternalHandoff: {
-            ...handoff,
-            settleBatch: { sourceSessionKeys: [handoff.sourceSessionKey], isCurrent: () => true },
-          },
-        },
-      }),
-    ).toBe(false);
-  });
-
   const trustedSessionKey = "agent:main:direct:claude-trusted-announce";
   const trustedChildSessionKey = "agent:openclaw:subagent:child";
   const trustedChildEntry: SessionEntry = {
@@ -377,83 +338,6 @@ describe("CLI completion tool handoffs", () => {
     });
 
     expect(scoped.tools.map((tool) => tool.name)).toEqual(["read"]);
-  });
-
-  type CompletionGrant = Awaited<ReturnType<typeof runTrustedClaudeCompletion>>;
-
-  /** The grant a message-tool-only completion mints: requester tools plus a source-bound `message`. */
-  function sourceBoundGrant(context: CompletionGrant): CompletionGrant {
-    return {
-      ...context,
-      sourceReplyDeliveryMode: "message_tool_only",
-      sourceReplyOnly: true,
-      toolsAllow: ["read", "exec", "message"],
-    };
-  }
-
-  async function resolveGrantToolNames(context: CompletionGrant, tools?: OpenClawConfig["tools"]) {
-    const scoped = await resolveMcpLoopbackScopedTools({
-      cfg: { session: { store: storePath }, ...(tools ? { tools } : {}) },
-      context,
-    });
-    return scoped.tools.map((tool) => tool.name).toSorted();
-  }
-
-  it.each([
-    {
-      name: "a narrowed operator allowlist",
-      tools: { allow: ["read"] },
-      kept: ["message", "read"],
-    },
-    {
-      name: "a narrowed inherited allowlist",
-      child: { inheritedToolAllow: ["read"] },
-      kept: ["message", "read"],
-    },
-    { name: "an operator deny of message", tools: { deny: ["message"] }, kept: ["exec", "read"] },
-    {
-      name: "an inherited deny of message",
-      child: { inheritedToolDeny: ["message"] },
-      kept: ["exec", "read"],
-    },
-  ] satisfies Array<{
-    name: string;
-    tools?: OpenClawConfig["tools"];
-    child?: Partial<SessionEntry>;
-    kept: string[];
-  }>)("re-applies $name to a source-bound completion grant", async (testCase) => {
-    // The grant is minted with read, exec and message; the restriction arrives afterwards.
-    const context = await runTrustedClaudeCompletion({ inheritedToolDeny: [] });
-    if ("child" in testCase) {
-      await replaceSessionEntry(
-        { sessionKey: trustedChildSessionKey, storePath },
-        { ...trustedChildEntry, inheritedToolDeny: [], ...testCase.child },
-      );
-      clearSessionStoreCacheForTest();
-    }
-
-    const names = await resolveGrantToolNames(
-      sourceBoundGrant(context),
-      "tools" in testCase ? testCase.tools : undefined,
-    );
-
-    expect(names).toEqual(testCase.kept);
-  });
-
-  it("keeps sender-derived restrictions on a source-bound completion grant", async () => {
-    // A child spawned from a sender-restricted turn persists that sender's denies; a
-    // completion resolves them from the child envelope, not from a live sender lookup.
-    const context = await runTrustedClaudeCompletion({ inheritedToolDeny: ["exec"] });
-    const withoutMessage = (names: string[]) => names.filter((name) => name !== "message");
-
-    const automatic = await resolveGrantToolNames({
-      ...context,
-      toolsAllow: ["read", "exec", "message"],
-    });
-    const sourceBound = await resolveGrantToolNames(sourceBoundGrant(context));
-
-    expect(sourceBound).not.toContain("exec");
-    expect(withoutMessage(sourceBound)).toEqual(withoutMessage(automatic));
   });
 
   it("fails closed when a completion grant outlives its requester lineage", async () => {

@@ -67,10 +67,6 @@ import type { SkillWorkshopRunOptions } from "../skills/workshop/types.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../utils/message-channel-constants.js";
 import { normalizeMessageChannel } from "../utils/message-channel-core.js";
 import type { McpLoopbackRequestContext } from "./mcp-grant-store.js";
-import {
-  selectGatewayToolPolicies,
-  staleCompletionGrantError,
-} from "./tool-resolution-completion.js";
 
 type GatewayScopedToolSurface = "http" | "loopback";
 
@@ -238,7 +234,7 @@ export function resolveGatewayScopedTools(
     params.trustedInternalHandoff &&
     requesterPolicies.requesterPolicySource !== "completion-handoff"
   ) {
-    throw staleCompletionGrantError();
+    throw new Error("CLI completion tool grant no longer matches its requester policy");
   }
   const sandboxRuntime = resolveSandboxRuntimeStatus({
     cfg: params.cfg,
@@ -644,39 +640,29 @@ export function resolveGatewayScopedTools(
   ): AnyAgentTool[] {
     const current =
       config === params.cfg ? configuredToolPolicies : resolveConfiguredToolPolicies(config);
-    const policies = selectGatewayToolPolicies({
-      current,
-      requesterPolicies,
-      sandboxPolicy,
-      grant: params,
-      config,
-      sessionKey: runtimePolicySessionKey,
-      agentId: policyAgentId,
-      sourceReplyDeliveryMode,
-    });
     return applyToolPolicyPipeline({
       tools: toolsForMessageProvider,
       toolMeta: (tool: AnyAgentTool) => getPluginToolMeta(tool),
       warn: logWarn,
       steps: [
         ...buildDefaultToolPolicyPipelineSteps({
-          profilePolicy: policies.profilePolicy,
+          profilePolicy: current.profilePolicyWithAlsoAllow,
           profile: current.profile,
           profileUnavailableCoreWarningAllowlist: current.profilePolicy?.allow,
-          providerProfilePolicy: policies.providerProfilePolicy,
+          providerProfilePolicy: current.providerProfilePolicyWithAlsoAllow,
           providerProfile: current.providerProfile,
           providerProfileUnavailableCoreWarningAllowlist: current.providerProfilePolicy?.allow,
-          globalPolicy: policies.globalPolicy,
-          globalProviderPolicy: policies.globalProviderPolicy,
-          agentPolicy: policies.agentPolicy,
-          agentProviderPolicy: policies.agentProviderPolicy,
-          groupPolicy: policies.groupPolicy,
-          senderPolicy: policies.senderPolicy,
+          globalPolicy: current.globalPolicy,
+          globalProviderPolicy: current.globalProviderPolicy,
+          agentPolicy: current.agentPolicy,
+          agentProviderPolicy: current.agentProviderPolicy,
+          groupPolicy,
+          senderPolicy,
           agentId: policyAgentId,
         }),
-        { policy: policies.sandboxPolicy, label: "sandbox tools.allow" },
-        { policy: policies.subagentPolicy, label: "subagent tools.allow" },
-        { policy: policies.inheritedToolPolicy, label: "inherited tools" },
+        { policy: sandboxPolicy, label: "sandbox tools.allow" },
+        { policy: subagentPolicy, label: "subagent tools.allow" },
+        { policy: inheritedToolPolicy, label: "inherited tools" },
       ],
       declaredToolAllowlist,
       onFilter,

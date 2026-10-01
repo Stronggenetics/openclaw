@@ -50,25 +50,6 @@ describe("buildCliMcpGrantContext source-reply authority", () => {
     expect(buildGrant().sourceReplyOnly).toBe(true);
   });
 
-  it("keeps restored completion tools bound to the source reply", () => {
-    const trustedInternalHandoff = {
-      kind: "subagent-completion" as const,
-      sourceSessionKey: "agent:main:subagent:child",
-      targetSessionKey: "agent:main:telegram:group:chat123",
-      targetSessionId: "parent-session",
-      provider: "anthropic",
-      model: "claude-opus-4-6",
-    };
-    const grant = buildGrant({
-      trustedInternalHandoff,
-      cliToolAvailability: { native: [], openClaw: ["read", "exec", "message"] },
-    });
-    expect(grant.sourceReplyOnly).toBe(true);
-    expect(grant.trustedInternalHandoff).toEqual(trustedInternalHandoff);
-    expect(grant.inputProvenance?.sourceTool).toBe("subagent_announce");
-    expect(() => structuredClone(grant)).not.toThrow();
-  });
-
   it("carries the prepared model vision capability into the loopback grant", () => {
     expect(buildGrant({ modelHasVision: true }).modelHasVision).toBe(true);
   });
