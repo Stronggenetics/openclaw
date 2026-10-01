@@ -30,7 +30,6 @@ import type { AgentRunTerminalReplySnapshot } from "../agent-run-terminal-reply.
 import type { ExecApprovalContinuationPromptRange } from "../bash-tools.exec-approval-output.js";
 import { isClaudeToolResultBlockType, isClaudeToolUseBlockType } from "../cli-output-records.js";
 import { cliBackendLog } from "../cli-runner/log.js";
-import { getCliSessionBinding } from "../cli-session.js";
 import type { TrustedSubagentCompletionHandoff } from "../subagents/announce/subagent-announce-handoff.js";
 import { resolveClaudeCliProjectDirForWorkspace } from "./claude-cli-project-dir.js";
 
@@ -430,24 +429,17 @@ export function claudeCliMediatesCompletionTools(
   );
 }
 
-/** Seed a fallback retry on another runtime from the Claude CLI session it left. */
-export function resolveClaudeCliFallbackPrelude(
-  params: {
-    isFallbackRetry?: boolean;
-    originalProvider: string;
-    providerOverride: string;
-    sessionEntry: SessionEntry | undefined;
-  },
+/** A fallback retry that leaves Claude CLI for another runtime is seeded from its session. */
+export function fallbackRetryLeavesClaudeCli(
+  params: { isFallbackRetry?: boolean; originalProvider: string; providerOverride: string },
   isRawModelRun: boolean,
-): string {
-  return !isRawModelRun &&
-    params.isFallbackRetry &&
+): boolean {
+  return (
+    !isRawModelRun &&
+    params.isFallbackRetry === true &&
     isClaudeCliProvider(params.originalProvider) &&
     !isClaudeCliProvider(params.providerOverride)
-    ? buildClaudeCliFallbackContextPrelude({
-        cliSessionId: getCliSessionBinding(params.sessionEntry, "claude-cli")?.sessionId,
-      })
-    : "";
+  );
 }
 
 /** Creates an accumulator that strips ACP silent-reply prefixes while streaming. */

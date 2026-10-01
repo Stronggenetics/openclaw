@@ -81,10 +81,11 @@ import { DEFAULT_MAX_LIVE_TOOL_RESULT_CHARS } from "../tool-result-limits.js";
 import { resolveHarnessAuthProfileSelection } from "./attempt-auth-selection.js";
 import { emitAgentAttemptRuntimeStart } from "./attempt-callbacks.js";
 import {
+  buildClaudeCliFallbackContextPrelude,
   claudeCliMediatesCompletionTools,
   claudeCliSessionTranscriptHasContent,
+  fallbackRetryLeavesClaudeCli,
   isClaudeCliProvider,
-  resolveClaudeCliFallbackPrelude,
   resolveFallbackRetryPrompt,
   rebaseExecApprovalContinuationPromptRange,
 } from "./attempt-execution.helpers.js";
@@ -244,7 +245,11 @@ export function runAgentAttempt(
     completionToolPolicies !== undefined &&
     isToolAllowedByPolicies("message", Object.values(completionToolPolicies)) &&
     isRuntimeToolAllowed("message", params.opts.toolsAllow);
-  const claudeCliFallbackPrelude = resolveClaudeCliFallbackPrelude(params, isRawModelRun);
+  const claudeCliFallbackPrelude = fallbackRetryLeavesClaudeCli(params, isRawModelRun)
+    ? buildClaudeCliFallbackContextPrelude({
+        cliSessionId: getCliSessionBinding(params.sessionEntry, "claude-cli")?.sessionId,
+      })
+    : "";
   const resolvedPrompt = resolveFallbackRetryPrompt({
     body: params.body,
     isFallbackRetry: params.isFallbackRetry,
