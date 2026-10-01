@@ -186,10 +186,16 @@ export function buildCliMcpGrantContext(params: {
     params.run.inputProvenance?.kind === "inter_session" &&
     params.run.inputProvenance.sourceTool === "subagent_announce" &&
     params.run.sourceReplyDeliveryMode === "message_tool_only" &&
-    grantedToolsAllow?.length === 1 &&
-    grantedToolsAllow[0] === "message";
+    (params.run.trustedInternalHandoff !== undefined ||
+      (grantedToolsAllow?.length === 1 && grantedToolsAllow[0] === "message"));
   return {
     sessionKey,
+    ...(params.run.trustedInternalHandoff
+      ? {
+          trustedInternalHandoff: params.run.trustedInternalHandoff,
+          inputProvenance: params.run.inputProvenance,
+        }
+      : {}),
     runtimePolicySessionKey,
     ...(params.runtimePolicyAgentId ? { runtimePolicyAgentId: params.runtimePolicyAgentId } : {}),
     agentId: params.agentId,

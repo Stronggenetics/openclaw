@@ -20,6 +20,7 @@ import {
   type SessionTranscriptRuntimeTarget,
   waitForSessionTranscriptProjection,
 } from "../../config/sessions/session-accessor.js";
+import type { SessionEntry } from "../../config/sessions/types.js";
 import {
   type ClaudeCliFallbackSeed,
   readClaudeCliFallbackSeed,
@@ -29,6 +30,8 @@ import type { AgentRunTerminalReplySnapshot } from "../agent-run-terminal-reply.
 import type { ExecApprovalContinuationPromptRange } from "../bash-tools.exec-approval-output.js";
 import { isClaudeToolResultBlockType, isClaudeToolUseBlockType } from "../cli-output-records.js";
 import { cliBackendLog } from "../cli-runner/log.js";
+import { getCliSessionBinding } from "../cli-session.js";
+import type { TrustedSubagentCompletionHandoff } from "../subagents/announce/subagent-announce-handoff.js";
 import { resolveClaudeCliProjectDirForWorkspace } from "./claude-cli-project-dir.js";
 
 const CLAUDE_CLI_TRANSCRIPT_MAX_RECORDS = 500;
@@ -403,6 +406,48 @@ export function buildClaudeCliFallbackContextPrelude(params: {
     return "";
   }
   return formatClaudeCliFallbackPrelude(seed, { charBudget: params.charBudget });
+}
+
+export function isClaudeCliProvider(provider: string): boolean {
+  return provider.trim().toLowerCase() === "claude-cli";
+}
+
+/**
+ * Claude CLI enforces a requester's tool cap through mediated MCP tools. A node-hosted
+ * session or a settle batch cannot, matching what CLI run preparation refuses.
+ */
+export function claudeCliMediatesCompletionTools(
+  provider: string,
+  run: {
+    sessionEntry: SessionEntry | undefined;
+    opts: { trustedInternalHandoff?: TrustedSubagentCompletionHandoff };
+  },
+): boolean {
+  return (
+    isClaudeCliProvider(provider) &&
+    run.sessionEntry?.execHost !== "node" &&
+    run.opts.trustedInternalHandoff?.settleBatch === undefined
+  );
+}
+
+/** Seed a fallback retry on another runtime from the Claude CLI session it left. */
+export function resolveClaudeCliFallbackPrelude(
+  params: {
+    isFallbackRetry?: boolean;
+    originalProvider: string;
+    providerOverride: string;
+    sessionEntry: SessionEntry | undefined;
+  },
+  isRawModelRun: boolean,
+): string {
+  return !isRawModelRun &&
+    params.isFallbackRetry &&
+    isClaudeCliProvider(params.originalProvider) &&
+    !isClaudeCliProvider(params.providerOverride)
+    ? buildClaudeCliFallbackContextPrelude({
+        cliSessionId: getCliSessionBinding(params.sessionEntry, "claude-cli")?.sessionId,
+      })
+    : "";
 }
 
 /** Creates an accumulator that strips ACP silent-reply prefixes while streaming. */

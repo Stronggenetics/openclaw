@@ -79,7 +79,7 @@ export type SubagentAnnounceDeliveryCase = {
   expectedToolsAllow?: readonly string[];
 };
 
-export const SUBAGENT_ANNOUNCE_DELIVERY_CASES: readonly SubagentAnnounceDeliveryCase[] = [
+const SUBAGENT_ANNOUNCE_DELIVERY_CASES: readonly SubagentAnnounceDeliveryCase[] = [
   {
     name: "automatic source replies",
     sourceReplyDeliveryMode: "automatic" as const,
@@ -182,6 +182,26 @@ export const SUBAGENT_ANNOUNCE_DELIVERY_CASES: readonly SubagentAnnounceDelivery
     expectedDisableTools: true,
   },
 ];
+
+// Claude CLI completions keep the requester tools wherever the embedded runner
+// would: automatic replies, or a message tool that survives every policy.
+function createClaudeCliSubagentAnnounceDeliveryCases(): SubagentAnnounceDeliveryCase[] {
+  return SUBAGENT_ANNOUNCE_DELIVERY_CASES.map((testCase) => {
+    const retainsRequesterTools =
+      testCase.sourceReplyDeliveryMode === "automatic"
+        ? testCase.trustedInternalHandoff !== false
+        : !testCase.expectedDisableTools;
+    return retainsRequesterTools
+      ? {
+          ...testCase,
+          expectedDisableTools: false,
+          expectedToolsAllow: testCase.runtimeToolsAllow ?? SUBAGENT_ANNOUNCE_REQUESTER_TOOLS,
+        }
+      : testCase;
+  });
+}
+export const SUBAGENT_ANNOUNCE_CLAUDE_CLI_DELIVERY_CASES =
+  createClaudeCliSubagentAnnounceDeliveryCases();
 
 function createEmbeddedSubagentAnnounceDeliveryCases(): SubagentAnnounceDeliveryCase[] {
   const cases: SubagentAnnounceDeliveryCase[] = [];

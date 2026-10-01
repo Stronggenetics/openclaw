@@ -81,18 +81,16 @@ import { DEFAULT_MAX_LIVE_TOOL_RESULT_CHARS } from "../tool-result-limits.js";
 import { resolveHarnessAuthProfileSelection } from "./attempt-auth-selection.js";
 import { emitAgentAttemptRuntimeStart } from "./attempt-callbacks.js";
 import {
-  buildClaudeCliFallbackContextPrelude,
+  claudeCliMediatesCompletionTools,
   claudeCliSessionTranscriptHasContent,
+  isClaudeCliProvider,
+  resolveClaudeCliFallbackPrelude,
   resolveFallbackRetryPrompt,
   rebaseExecApprovalContinuationPromptRange,
 } from "./attempt-execution.helpers.js";
 import type { AgentCommandOpts, AgentRunContext } from "./types.js";
 
 const log = createSubsystemLogger("agents/agent-command");
-
-function isClaudeCliProvider(provider: string): boolean {
-  return provider.trim().toLowerCase() === "claude-cli";
-}
 
 export function runAgentAttempt(
   params: Pick<RunEntryCandidateOptions, "isFallbackRetry" | "modelRoutingProvenance"> &
@@ -246,15 +244,7 @@ export function runAgentAttempt(
     completionToolPolicies !== undefined &&
     isToolAllowedByPolicies("message", Object.values(completionToolPolicies)) &&
     isRuntimeToolAllowed("message", params.opts.toolsAllow);
-  const claudeCliFallbackPrelude =
-    !isRawModelRun &&
-    params.isFallbackRetry &&
-    isClaudeCliProvider(params.originalProvider) &&
-    !isClaudeCliProvider(params.providerOverride)
-      ? buildClaudeCliFallbackContextPrelude({
-          cliSessionId: getCliSessionBinding(params.sessionEntry, "claude-cli")?.sessionId,
-        })
-      : "";
+  const claudeCliFallbackPrelude = resolveClaudeCliFallbackPrelude(params, isRawModelRun);
   const resolvedPrompt = resolveFallbackRetryPrompt({
     body: params.body,
     isFallbackRetry: params.isFallbackRetry,
@@ -298,10 +288,12 @@ export function runAgentAttempt(
         sessionRuntimeOverride,
         pinnedHarnessId,
       });
+  // Claude CLI enforces the requester's cap through its mediated MCP tools.
+  // Other CLI runtimes and node-hosted Claude cannot, so they stay tool-free.
   const completionRetainsRequesterTools =
     trustedSubagentAnnounceHandoff &&
     !isRawModelRun &&
-    !isCliExecutionProvider &&
+    (!isCliExecutionProvider || claudeCliMediatesCompletionTools(cliExecutionProvider, params)) &&
     (!messageToolOwnsVisibleReply(params.opts) || completionNeedsMessageDelivery);
   // Message-tool-only delivery constrains the visible reply, not the parent
   // continuation's verified authority. Keep the inherited cap while requiring
@@ -657,6 +649,9 @@ export function runAgentAttempt(
             modelProvider: params.providerOverride,
             requesterModel: { provider: params.providerOverride, model: params.modelOverride },
             provider: cliExecutionProvider,
+            trustedInternalHandoff: completionRetainsRequesterTools
+              ? params.opts.trustedInternalHandoff
+              : undefined,
             abortSignal: params.deferredLifecycle?.signal ?? params.opts.abortSignal,
             onExecutionStarted: params.opts.onExecutionStarted,
             cronCreatorCallerOrigin: params.opts.cronCreatorAuthorityCapability?.callerOrigin,

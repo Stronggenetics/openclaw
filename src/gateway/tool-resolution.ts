@@ -67,6 +67,10 @@ import type { SkillWorkshopRunOptions } from "../skills/workshop/types.js";
 import { INTERNAL_MESSAGE_CHANNEL } from "../utils/message-channel-constants.js";
 import { normalizeMessageChannel } from "../utils/message-channel-core.js";
 import type { McpLoopbackRequestContext } from "./mcp-grant-store.js";
+import {
+  selectGatewayToolPolicies,
+  staleCompletionGrantError,
+} from "./tool-resolution-completion.js";
 
 type GatewayScopedToolSurface = "http" | "loopback";
 
@@ -214,6 +218,11 @@ export function resolveGatewayScopedTools(
     senderName: params.senderName,
     senderUsername: params.senderUsername,
     senderE164: params.senderE164,
+    inputProvenance: params.inputProvenance,
+    trustedInternalHandoff: params.trustedInternalHandoff,
+    sessionId: params.sessionId,
+    modelProvider: params.modelProvider,
+    modelId: params.modelId,
     senderPolicyMode: params.scheduledToolPolicy
       ? "never"
       : nodeExecSurface
@@ -225,6 +234,12 @@ export function resolveGatewayScopedTools(
     requireConfiguredGroupAccount: params.scheduledToolPolicy?.mode === "account",
   });
   const { groupPolicy, senderPolicy, subagentPolicy, inheritedToolPolicy } = requesterPolicies;
+  if (
+    params.trustedInternalHandoff &&
+    requesterPolicies.requesterPolicySource !== "completion-handoff"
+  ) {
+    throw staleCompletionGrantError();
+  }
   const sandboxRuntime = resolveSandboxRuntimeStatus({
     cfg: params.cfg,
     sessionKey: params.sessionKey,
@@ -514,6 +529,8 @@ export function resolveGatewayScopedTools(
           senderUsername: params.senderUsername,
           senderE164: params.senderE164,
           senderIsOwner: params.senderIsOwner,
+          inputProvenance: params.inputProvenance,
+          trustedInternalHandoff: params.trustedInternalHandoff,
           trigger: params.trigger,
           approvalReviewerDeviceId: params.approvalReviewerDeviceId,
           sourceReplyDeliveryMode,
@@ -627,29 +644,39 @@ export function resolveGatewayScopedTools(
   ): AnyAgentTool[] {
     const current =
       config === params.cfg ? configuredToolPolicies : resolveConfiguredToolPolicies(config);
+    const policies = selectGatewayToolPolicies({
+      current,
+      requesterPolicies,
+      sandboxPolicy,
+      grant: params,
+      config,
+      sessionKey: runtimePolicySessionKey,
+      agentId: policyAgentId,
+      sourceReplyDeliveryMode,
+    });
     return applyToolPolicyPipeline({
       tools: toolsForMessageProvider,
       toolMeta: (tool: AnyAgentTool) => getPluginToolMeta(tool),
       warn: logWarn,
       steps: [
         ...buildDefaultToolPolicyPipelineSteps({
-          profilePolicy: current.profilePolicyWithAlsoAllow,
+          profilePolicy: policies.profilePolicy,
           profile: current.profile,
           profileUnavailableCoreWarningAllowlist: current.profilePolicy?.allow,
-          providerProfilePolicy: current.providerProfilePolicyWithAlsoAllow,
+          providerProfilePolicy: policies.providerProfilePolicy,
           providerProfile: current.providerProfile,
           providerProfileUnavailableCoreWarningAllowlist: current.providerProfilePolicy?.allow,
-          globalPolicy: current.globalPolicy,
-          globalProviderPolicy: current.globalProviderPolicy,
-          agentPolicy: current.agentPolicy,
-          agentProviderPolicy: current.agentProviderPolicy,
-          groupPolicy,
-          senderPolicy,
+          globalPolicy: policies.globalPolicy,
+          globalProviderPolicy: policies.globalProviderPolicy,
+          agentPolicy: policies.agentPolicy,
+          agentProviderPolicy: policies.agentProviderPolicy,
+          groupPolicy: policies.groupPolicy,
+          senderPolicy: policies.senderPolicy,
           agentId: policyAgentId,
         }),
-        { policy: sandboxPolicy, label: "sandbox tools.allow" },
-        { policy: subagentPolicy, label: "subagent tools.allow" },
-        { policy: inheritedToolPolicy, label: "inherited tools" },
+        { policy: policies.sandboxPolicy, label: "sandbox tools.allow" },
+        { policy: policies.subagentPolicy, label: "subagent tools.allow" },
+        { policy: policies.inheritedToolPolicy, label: "inherited tools" },
       ],
       declaredToolAllowlist,
       onFilter,
