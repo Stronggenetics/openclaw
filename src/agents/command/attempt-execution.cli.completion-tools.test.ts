@@ -2,7 +2,10 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SessionEntry } from "../../config/sessions.js";
-import { replaceSessionEntry } from "../../config/sessions/session-accessor.js";
+import {
+  replaceSessionEntry,
+  replaceSessionEntrySync,
+} from "../../config/sessions/session-accessor.js";
 import { clearSessionStoreCacheForTest } from "../../config/sessions/store-writer-state.js";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import {
@@ -481,6 +484,25 @@ describe("CLI completion tool handoffs", () => {
 
     // The second request would be a cache hit; the lineage check must still run.
     await expect(cache.resolve({ cfg, context, grantToken: "completion-grant" })).rejects.toThrow(
+      "CLI completion tool grant no longer matches its requester policy",
+    );
+  });
+
+  it("rechecks requester lineage when it changes while a cached lookup awaits", async () => {
+    const context = await runTrustedClaudeCompletion();
+    const cfg = { session: { store: storePath } };
+    const cache = new McpLoopbackToolCache();
+    await cache.resolve({ cfg, context, grantToken: "completion-grant" });
+
+    // The lookup yields before it reads the cache; the child is re-parented in that window.
+    const pending = cache.resolve({ cfg, context, grantToken: "completion-grant" });
+    replaceSessionEntrySync(
+      { sessionKey: trustedChildSessionKey, storePath },
+      { ...trustedChildEntry, spawnedBy: "agent:main:direct:another-requester" },
+    );
+    clearSessionStoreCacheForTest();
+
+    await expect(pending).rejects.toThrow(
       "CLI completion tool grant no longer matches its requester policy",
     );
   });

@@ -340,8 +340,6 @@ export class McpLoopbackToolCache {
   #epoch = 0;
 
   async resolve(input: McpLoopbackScopeParams): Promise<CachedScopedTools> {
-    // A cached list must not outlive the lineage its completion grant was minted for.
-    assertCompletionGrantLineage(input);
     const epoch = this.#epoch;
     const nodeExecParams = await resolveNodeExecScope(input, "exact");
     input.signal?.throwIfAborted();
@@ -350,6 +348,9 @@ export class McpLoopbackToolCache {
     const preDiscoveryCacheKey = buildMcpLoopbackToolCacheKey(nodeExecParams);
     const preDiscoveryCached = this.#entries.get(preDiscoveryCacheKey, nodeExecParams.cfg);
     if (preDiscoveryCached) {
+      // A cached list must not outlive the lineage its completion grant was minted for.
+      // Check after the awaits above, at the point the list is served.
+      assertCompletionGrantLineage(input);
       return preDiscoveryCached;
     }
 
@@ -360,6 +361,7 @@ export class McpLoopbackToolCache {
     const cacheKey = buildMcpLoopbackToolCacheKey(params);
     const cached = this.#entries.get(cacheKey, params.cfg);
     if (cached) {
+      assertCompletionGrantLineage(input);
       return cached;
     }
 
