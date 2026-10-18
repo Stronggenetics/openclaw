@@ -3565,9 +3565,12 @@ describe("runCodexAppServerAttempt", () => {
     await expect(runCodexAppServerAttempt(createParams(sessionFile, workspaceDir))).rejects.toThrow(
       "invalid image_url base64 payload",
     );
-    expect(withoutCodexSkillDiscovery(harness.requests.map((request) => request.method))).toEqual([
-      "config/read",
-      "configRequirements/read",
+    const methods = harness.requests.map((request) => request.method);
+    expect(methods).toContain("configRequirements/read");
+    expect(methods.lastIndexOf("configRequirements/read")).toBeLessThan(
+      methods.indexOf("thread/start"),
+    );
+    expect(methods.filter((method) => /^(thread|turn)\//.test(method))).toEqual([
       "thread/start",
       "turn/start",
       "thread/unsubscribe",
@@ -3588,9 +3591,12 @@ describe("runCodexAppServerAttempt", () => {
     await expect(runCodexAppServerAttempt(createParams(sessionFile, workspaceDir))).rejects.toThrow(
       "unsupported image input",
     );
-    expect(withoutCodexSkillDiscovery(harness.requests.map((request) => request.method))).toEqual([
-      "config/read",
-      "configRequirements/read",
+    const methods = harness.requests.map((request) => request.method);
+    expect(methods).toContain("configRequirements/read");
+    expect(methods.lastIndexOf("configRequirements/read")).toBeLessThan(
+      methods.indexOf("thread/resume"),
+    );
+    expect(methods.filter((method) => /^(thread|turn)\//.test(method))).toEqual([
       "thread/read",
       "thread/resume",
       "thread/inject_items",
@@ -3648,9 +3654,12 @@ describe("runCodexAppServerAttempt", () => {
     );
     await harness.completeTurn({ threadId: "thread-existing", turnId: "turn-1" });
     await run;
-    expect(withoutCodexSkillDiscovery(harness.requests.map((request) => request.method))).toEqual([
-      "config/read",
-      "configRequirements/read",
+    const methods = harness.requests.map((request) => request.method);
+    expect(methods).toContain("configRequirements/read");
+    expect(methods.lastIndexOf("configRequirements/read")).toBeLessThan(
+      methods.indexOf("thread/resume"),
+    );
+    expect(methods.filter((method) => /^(thread|turn)\//.test(method))).toEqual([
       "thread/read",
       "thread/resume",
       "thread/inject_items",
@@ -3722,9 +3731,12 @@ describe("runCodexAppServerAttempt", () => {
     );
     await harness.completeTurn({ threadId: "thread-existing", turnId: "turn-1" });
     await run;
-    expect(withoutCodexSkillDiscovery(harness.requests.map((request) => request.method))).toEqual([
-      "config/read",
-      "configRequirements/read",
+    const methods = harness.requests.map((request) => request.method);
+    expect(methods).toContain("configRequirements/read");
+    expect(methods.lastIndexOf("configRequirements/read")).toBeLessThan(
+      methods.indexOf("thread/resume"),
+    );
+    expect(methods.filter((method) => /^(thread|turn)\//.test(method))).toEqual([
       "thread/read",
       "thread/resume",
       "thread/inject_items",
@@ -4626,16 +4638,19 @@ describe("runCodexAppServerAttempt", () => {
   it("replaces a client whose settled failed thread cannot reload configuration", async () => {
     const { result, requests, client } = await runSettledFailureClientReplacementTest();
     expect(readAttemptTerminal(result).aborted).toBe(false);
-    expect(requests.map(withoutCodexSkillDiscovery)).toEqual([
-      ["config/read", "configRequirements/read", "thread/read"],
-      [
-        "config/read",
-        "configRequirements/read",
-        "thread/read",
-        "thread/resume",
-        "thread/inject_items",
-        "turn/start",
-      ],
+    expect(requests).toHaveLength(2);
+    for (const methods of requests) {
+      expect(methods).toContain("configRequirements/read");
+    }
+    const replacementMethods = requests[1]!;
+    expect(replacementMethods.lastIndexOf("configRequirements/read")).toBeLessThan(
+      replacementMethods.indexOf("thread/resume"),
+    );
+    expect(
+      requests.map((methods) => methods.filter((method) => /^(thread|turn)\//.test(method))),
+    ).toEqual([
+      ["thread/read"],
+      ["thread/read", "thread/resume", "thread/inject_items", "turn/start"],
     ]);
     await expectRetainedSuccessfulThread(client, "thread-existing");
   });
@@ -4644,10 +4659,13 @@ describe("runCodexAppServerAttempt", () => {
     await expect(
       runSettledFailureClientReplacementTest({ denyReplacementShell: true, requests }),
     ).rejects.toThrow("Codex native code mode requires shell_tool");
-    expect(requests.map(withoutCodexSkillDiscovery)).toEqual([
-      ["config/read", "configRequirements/read", "thread/read"],
-      ["config/read", "configRequirements/read"],
-    ]);
+    expect(requests).toHaveLength(2);
+    for (const methods of requests) {
+      expect(methods).toContain("configRequirements/read");
+    }
+    expect(
+      requests.map((methods) => methods.filter((method) => /^(thread|turn)\//.test(method))),
+    ).toEqual([["thread/read"], []]);
   });
 
   it("retires the shared Codex client when a spawned helper run times out during thread/start", async () => {

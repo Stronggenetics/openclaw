@@ -102,11 +102,14 @@ describe("cron model schema regressions", () => {
     expect(findLlamacppGbnfSchemaViolations(projected, "cron.parameters")).toEqual([]);
   });
 
-  it("keeps conversation declarations independent of session scope", () => {
-    expect(
-      createCronTool({ agentSessionKey: "agent:main:main", agentId: "main" }).parameters,
-    ).toEqual(createCronTool({ agentId: "main" }).parameters);
-  });
+  it.each([undefined, " agent:main:main "])(
+    "advertises job retargeting only without session scope (%j)",
+    (agentSessionKey) => {
+      const parameters = createCronTool({ agentSessionKey, agentId: "main" }).parameters;
+      expect(Boolean(propertyAt(parameters, "job.agentId"))).toBe(!agentSessionKey);
+      expect(propertyAt(parameters, "agentId")).toMatchObject({ type: "string" });
+    },
+  );
 
   it("preserves failure-alert values in the shared job schema", () => {
     expect(propertyAt(schema, "job.failureAlert")?.anyOf).toContainEqual({
@@ -186,14 +189,21 @@ describe("cron model schema regressions", () => {
       "at",
       "every",
       "cron",
-      "on-exit",
     ]);
     expect(propertyAt(disabled.parameters, "job.payload.kind")?.enum).toEqual([
       "systemEvent",
       "agentTurn",
-      "command",
     ]);
-    for (const key of ["source", "options"]) {
+    for (const key of [
+      "command",
+      "cwd",
+      "mode",
+      "match",
+      "batchMs",
+      "maxBatchBytes",
+      "source",
+      "options",
+    ]) {
       expect(propertyAt(disabled.parameters, `job.schedule.${key}`)).toBeUndefined();
     }
     for (const key of ["script", "toolBudget"]) {
