@@ -1,5 +1,5 @@
 import { createOpenClawCodingTools } from "openclaw/plugin-sdk/agent-harness";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createCodexDynamicToolBridge } from "./dynamic-tools.js";
 import { parseCodexNativeToolCatalog } from "./native-tool-catalog.js";
 import { flattenCodexDynamicToolFunctions } from "./protocol.js";
@@ -94,6 +94,60 @@ describe("Codex collector availability", () => {
           expect.arrayContaining(["sessions_spawn", "agents_wait"]),
         );
       }
+    },
+  );
+
+  it.each(
+    (["current", "fallback"] as const).flatMap((source) =>
+      [false, true].map((readerChanged) => ({ source, readerChanged })),
+    ),
+  )(
+    "rechecks $source collector definitions after finalization (reader changed: $readerChanged)",
+    async ({ source, readerChanged }) => {
+      const accepted = createCodexDynamicToolBridge({
+        tools: createCollectorTools(),
+        loading: "direct",
+        signal: new AbortController().signal,
+      });
+      const acceptedCatalog = JSON.stringify(accepted.specs);
+      const currentTools = createCollectorTools();
+      const spawn = currentTools.find((tool) => tool.name === "sessions_spawn")!;
+      const reader = currentTools.find((tool) => tool.name === "agents_wait")!;
+      expect(spawn.parameters).toHaveProperty("properties.collect");
+      const execute = vi.fn(async () => ({
+        content: [{ type: "text" as const, text: "fresh collector executor" }],
+        details: {},
+      }));
+      spawn.execute = execute;
+      if (readerChanged) {
+        reader.description = `${reader.description} Changed reader contract.`;
+      }
+      const bridge = createCodexDynamicToolBridge({
+        tools: source === "current" ? currentTools : [],
+        registeredFallbackTools: source === "fallback" ? currentTools : [],
+        registeredSpecs: accepted.specs,
+        requireExactRegisteredDefinitions: true,
+        loading: "direct",
+        signal: new AbortController().signal,
+      });
+      const result = await bridge.handleToolCall({
+        callId: "post-finalization-contract",
+        threadId: "retained-parent",
+        turnId: "next-turn",
+        tool: "sessions_spawn",
+        arguments: { task: "synthetic collector availability check" },
+      });
+      if (readerChanged) {
+        expect(result).toMatchObject({ success: false, executionStarted: false });
+        expect(execute).not.toHaveBeenCalled();
+        expect(bridge.availableTools).toEqual([]);
+      } else {
+        expect(result).toMatchObject({ success: true });
+        expect(execute).toHaveBeenCalledTimes(1);
+        expect(spawn.parameters).toHaveProperty("properties.collect");
+      }
+      expect(JSON.stringify(bridge.specs)).toBe(acceptedCatalog);
+      expect(JSON.stringify(accepted.specs)).toBe(acceptedCatalog);
     },
   );
 

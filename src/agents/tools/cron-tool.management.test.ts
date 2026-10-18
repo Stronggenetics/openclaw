@@ -99,6 +99,20 @@ async function withAdminTool(
 }
 
 describe("admin automation management", () => {
+  it.each(["channel-owner", "unknown"] as const)(
+    "keeps conversation declarations stable when %s authority is absent",
+    async (origin) => {
+      const ordinary = createCronTool({ agentSessionKey: "agent:main:control-ui" });
+      await withAdminTool(origin, async (owner, calls) => {
+        // Native conversations retain these declarations while child work runs;
+        // current authority belongs to execution, rather than thread identity.
+        expect(ordinary.parameters).toEqual(owner.parameters);
+        expect(ordinary.description).toBe(owner.description);
+        expect(calls).toEqual([]);
+      });
+    },
+  );
+
   it.each(["channel-owner"] as const)(
     "permits %s command edits without recapturing creator authority",
     async (origin) => {

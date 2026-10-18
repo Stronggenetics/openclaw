@@ -83,13 +83,16 @@ export function prepareCodexAttemptResources(prompt: CodexAttemptPrompt) {
     : undefined;
   let nativeModelAdmission: CodexStartOrResumeThreadParams["nativeModelAdmission"];
   try {
-    nativeModelAdmission = modelAdmissionSource
-      ? modelAdmissionSource.modelPolicyRequired !== false
-        ? "required"
-        : options.nativeHookRelay?.enabled === false
-          ? "disabled"
-          : "optional"
-      : undefined;
+    // System callers have current no-operator custody, not an absent admission owner.
+    // Keep their native input hook installed without inheriting another caller's policy.
+    nativeModelAdmission =
+      runtime.nativeToolSurfaceEnabled && params.hostCapabilities.retainSourceAuthority
+        ? modelAdmissionSource && modelAdmissionSource.modelPolicyRequired !== false
+          ? "required"
+          : options.nativeHookRelay?.enabled === false
+            ? "disabled"
+            : "optional"
+        : undefined;
   } finally {
     modelAdmissionSource?.release();
   }

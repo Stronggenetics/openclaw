@@ -87,8 +87,10 @@ import {
 } from "./native-subagent-notification.js";
 import {
   canNativeParentConsumeCompletion,
+  hasNativeChildrenForParent,
   observeNativeParentTurn,
   registerNativeSubagentParent,
+  releaseNativeParentThreadIfChildrenTerminal,
   type NativeParentRegistration,
 } from "./native-subagent-parent-owner.js";
 import { matchesNativeAssignmentLifecycle } from "./native-subagent-pending-assignments.js";
@@ -480,7 +482,7 @@ class Monitor {
     }
     this.admissionCustody.retainOnly(() => false);
     for (const [parentThreadId] of this.parentStates) {
-      if (!this.hasChildrenForParent(parentThreadId)) {
+      if (!hasNativeChildrenForParent(this.childStates.values(), parentThreadId)) {
         this.parentStates.delete(parentThreadId);
       }
     }
@@ -1540,6 +1542,11 @@ class Monitor {
     this.recovery.markTerminalThread(childState.childThreadId, state.parentThreadId);
     releaseNativeDirectChild(childState);
     this.recovery.clearRecoveryTimers(childState);
+    releaseNativeParentThreadIfChildrenTerminal(
+      this.childStates.values(),
+      this.parentThreadRetentions,
+      state.parentThreadId,
+    );
     this.completionDelivery.applyReceipts(
       state,
       childState.deliveryReceipts.record(
@@ -2248,11 +2255,11 @@ class Monitor {
     if (this.childStates.get(childState.runId) === childState) {
       this.childStates.delete(childState.runId);
     }
-    if (!this.hasChildrenForParent(childState.parentThreadId)) {
-      const releaseParentThread = this.parentThreadRetentions.get(childState.parentThreadId);
-      this.parentThreadRetentions.delete(childState.parentThreadId);
-      releaseParentThread?.();
-    }
+    releaseNativeParentThreadIfChildrenTerminal(
+      this.childStates.values(),
+      this.parentThreadRetentions,
+      childState.parentThreadId,
+    );
     this.releaseClientRetentionIfIdle();
     const state = this.parentStates.get(childState.parentThreadId);
     if (state) {
@@ -2385,21 +2392,12 @@ class Monitor {
       this.submissions.hasCustody(state) ||
       state.owners.size > 0 ||
       this.childCloses.hasPending(state) ||
-      this.hasChildrenForParent(state.parentThreadId)
+      hasNativeChildrenForParent(this.childStates.values(), state.parentThreadId)
     ) {
       return true;
     }
     for (const known of this.knownChildren.values()) {
       if (known.parent === state && this.currentChild(known.assignment.childThreadId)) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  private hasChildrenForParent(parentThreadId: string): boolean {
-    for (const childState of this.childStates.values()) {
-      if (childState.parentThreadId === parentThreadId) {
         return true;
       }
     }

@@ -111,13 +111,51 @@ function nativeHarness(
 describe("Codex participant native admission", () => {
   setupRunAttemptTestHooks({ sessionOwner: null });
   it.each([
-    { hooks: "optional", lifecycle: "fresh", participants: "solo", policy: "normal" },
-    { hooks: "managed-only", lifecycle: "resumed", participants: "solo", policy: "normal" },
-    { hooks: "disabled", lifecycle: "fresh", participants: "multiple", policy: "normal" },
-    { hooks: "disabled", lifecycle: "fresh", participants: "multiple", policy: "token-sharing" },
+    {
+      hooks: "optional",
+      lifecycle: "fresh",
+      participants: "solo",
+      policy: "normal",
+      source: "operator",
+    },
+    {
+      hooks: "managed-only",
+      lifecycle: "resumed",
+      participants: "solo",
+      policy: "normal",
+      source: "operator",
+    },
+    {
+      hooks: "disabled",
+      lifecycle: "fresh",
+      participants: "multiple",
+      policy: "normal",
+      source: "operator",
+    },
+    {
+      hooks: "disabled",
+      lifecycle: "fresh",
+      participants: "multiple",
+      policy: "token-sharing",
+      source: "operator",
+    },
+    {
+      hooks: "optional",
+      lifecycle: "fresh",
+      participants: "solo",
+      policy: "normal",
+      source: "no-operator",
+    },
+    {
+      hooks: "managed-only",
+      lifecycle: "resumed",
+      participants: "solo",
+      policy: "normal",
+      source: "no-operator",
+    },
   ] as const)(
-    "handles $participants participants with $hooks native admission on a $lifecycle $policy thread",
-    async ({ hooks, lifecycle, participants, policy }) => {
+    "handles $participants participants with $hooks native admission on a $lifecycle $policy thread ($source)",
+    async ({ hooks, lifecycle, participants, policy, source }) => {
       const params = participantParams("participant-model-hooks");
       params.sessionKey = undefined;
       if (policy === "token-sharing") {
@@ -155,6 +193,12 @@ describe("Codex participant native admission", () => {
           throw spawnFailure;
         }
       });
+      if (source === "no-operator") {
+        params.hostCapabilities = createCodexTestHostCapabilities({
+          ...params.hostCapabilities,
+          retainSourceAuthority: () => undefined,
+        });
+      }
       const harness = await createLeasedCodexLifecycleHarness({
         agentDir: path.join(tempDir, "participant-wire-agent"),
         persistedThreads: lifecycle === "resumed" ? ["thread-existing"] : [],
@@ -240,17 +284,20 @@ describe("Codex participant native admission", () => {
             }
             const binding = await startThread();
             resources.state.thread = binding;
-            expect(preflight).toHaveBeenCalledWith(
-              expect.objectContaining({
-                nativeModelAdmission: policy === "token-sharing" ? undefined : "optional",
-              }),
-            );
             const admission = await preflight.mock.results[0]?.value;
             expect(admission).toBeDefined();
             const request = harness.request.mock.calls.find(
               ([method]) => method === (lifecycle === "resumed" ? "thread/resume" : "thread/start"),
             )?.[1];
             expect(request).toBeDefined();
+            if (hooks === "optional") {
+              expect(request).toHaveProperty(["config", "hooks.PreToolUse", 0]);
+            }
+            expect(preflight).toHaveBeenCalledWith(
+              expect.objectContaining({
+                nativeModelAdmission: policy === "token-sharing" ? undefined : "optional",
+              }),
+            );
             expect(binding.lifecycle.action).toBe(lifecycle === "resumed" ? "resumed" : "started");
             const route = getCodexInferenceThread(harness.client, binding.threadId);
             expect(route).toBeDefined();
