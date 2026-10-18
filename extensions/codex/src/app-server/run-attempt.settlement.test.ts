@@ -143,8 +143,23 @@ describe("Codex app-server terminal settlement", () => {
 
   it("releases a warm claim after degraded settlement without retiring a shared sibling client", async () => {
     const retired = vi.spyOn(sharedClient, "retireSharedCodexAppServerClientIfCurrent");
-    const physical = createInferenceReadyClientHarness();
-    const startClient = vi.spyOn(CodexAppServerClient, "start").mockResolvedValue(physical.client);
+    const physical = createInferenceReadyClientHarness({
+      onWrite: (line, send) => {
+        const request: unknown = JSON.parse(line);
+        if (
+          isJsonObject(request) &&
+          request.method === "configRequirements/read" &&
+          request.id !== undefined
+        ) {
+          send({ id: request.id, result: { requirements: null } });
+        }
+      },
+    });
+    const clientStarted = createDeferred<void>();
+    const startClient = vi.spyOn(CodexAppServerClient, "start").mockImplementation(async () => {
+      clientStarted.resolve();
+      return physical.client;
+    });
     const projection = createDeferred<void>();
     const finalMirrorRelease = createDeferred<void>();
     const finalMirrorStarted = createDeferred<void>();
@@ -183,13 +198,12 @@ describe("Codex app-server terminal settlement", () => {
           },
       );
     try {
+      await clientStarted.promise;
       const initialize = await waitForHarnessRequest(physical, "initialize");
       physical.send({
         id: initialize.id,
         result: { userAgent: `openclaw/${CODEX_APP_SERVER_VERSION} (macOS; test)` },
       });
-      const firstRequirements = await waitForHarnessRequest(physical, "configRequirements/read");
-      physical.send({ id: firstRequirements.id, result: { requirements: null } });
       const firstThread = await waitForHarnessRequest(physical, "thread/start");
       physical.send({ id: firstThread.id, result: threadStartResult("thread-settlement") });
       const warmupTurn = await waitForHarnessRequest(physical, "turn/start");
@@ -207,24 +221,12 @@ describe("Codex app-server terminal settlement", () => {
       const firstStart = physical.writes.length;
       firstRun = runCodexAppServerAttempt(firstParams);
       void firstRun.then(firstSettled, firstSettled);
-      const firstRequirementsAgain = await waitForHarnessRequest(
-        physical,
-        "configRequirements/read",
-        firstStart,
-      );
-      physical.send({ id: firstRequirementsAgain.id, result: { requirements: null } });
       const firstTurn = await waitForHarnessRequest(physical, "turn/start", firstStart);
       physical.send({ id: firstTurn.id, result: turnStartResult("turn-settlement") });
       expect(isCodexAppServerLiveThreadClaimed(physical.client, "thread-settlement")).toBe(true);
 
       const siblingStart = physical.writes.length;
       siblingRun = runCodexAppServerAttempt(siblingParams);
-      const siblingRequirements = await waitForHarnessRequest(
-        physical,
-        "configRequirements/read",
-        siblingStart,
-      );
-      physical.send({ id: siblingRequirements.id, result: { requirements: null } });
       const siblingThread = await waitForHarnessRequest(physical, "thread/start", siblingStart);
       physical.send({ id: siblingThread.id, result: threadStartResult("thread-sibling") });
       const siblingTurn = await waitForHarnessRequest(physical, "turn/start", siblingStart);
