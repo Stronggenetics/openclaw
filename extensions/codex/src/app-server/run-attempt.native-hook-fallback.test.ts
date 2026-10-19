@@ -184,9 +184,6 @@ describe("Codex participant native admission", () => {
           }),
         });
       }
-      const ambiguity = new Error(
-        "Several people have steered this turn: Alice (user: alice), Bob (user: bob). Pass the requester's requester_profile.id as user, or ask them if unclear.",
-      );
       let spawnFailure: Error | undefined;
       params.hostCapabilities = participantHostCapabilities(() => {
         if (spawnFailure) {
@@ -253,9 +250,6 @@ describe("Codex participant native admission", () => {
                 nativeModelAdmission: resources.nativeModelAdmission,
                 buildFinalConfigPatch: resources.buildNativeHookRelayFinalConfigPatch,
               });
-            if (participants === "multiple") {
-              spawnFailure = ambiguity;
-            }
             if (participants === "multiple" && policy === "normal") {
               for (const message of [
                 "Alice's access changed; ask them again",
@@ -269,18 +263,7 @@ describe("Codex participant native admission", () => {
                   ),
                 ).rejects.toBe(spawnFailure);
               }
-              spawnFailure = ambiguity;
-              await expect(startThread()).rejects.toMatchObject({
-                message:
-                  "Several people have steered this turn, and this Codex setup cannot run native sub-agents safely for more than one person without native hook admission. Send the request again as a new message so it runs as its own turn.",
-                cause: ambiguity,
-              });
-              expect(
-                harness.request.mock.calls.filter(([method]) =>
-                  ["thread/start", "thread/resume", "turn/start"].includes(method),
-                ),
-              ).toEqual([]);
-              return;
+              spawnFailure = undefined;
             }
             const binding = await startThread();
             resources.state.thread = binding;
@@ -295,7 +278,12 @@ describe("Codex participant native admission", () => {
             }
             expect(preflight).toHaveBeenCalledWith(
               expect.objectContaining({
-                nativeModelAdmission: policy === "token-sharing" ? undefined : "optional",
+                nativeModelAdmission:
+                  policy === "token-sharing"
+                    ? undefined
+                    : hooks === "disabled"
+                      ? "disabled"
+                      : "optional",
               }),
             );
             expect(binding.lifecycle.action).toBe(lifecycle === "resumed" ? "resumed" : "started");
@@ -341,11 +329,9 @@ describe("Codex participant native admission", () => {
                 stdout: "",
                 exitCode: 0,
               });
-              spawnFailure = ambiguity;
-              const response = await spawn("several-people");
-              expect(response.stdout).toContain(
-                "Use sessions_spawn with the requester's requester_profile.id as user",
-              );
+              spawnFailure = new Error("This turn has ended; ask again in a new turn.");
+              const response = await spawn("ended-parent");
+              expect(response.stdout).toContain(spawnFailure.message);
               expect(JSON.parse(response.stdout)).toMatchObject({
                 hookSpecificOutput: { permissionDecision: "deny" },
               });
@@ -463,14 +449,14 @@ describe("Codex native hook Gateway fallback", () => {
     },
   );
 
-  it("publishes cross-profile steering from effective delegation policy and installed admission", async () => {
+  it("permits incumbent-authority steering independently of native hook availability", async () => {
     const registered = vi.spyOn(agentHarnessRuntime, "setActiveEmbeddedRun");
     for (const { hooks, policy, supportsSteering } of [
-      { hooks: "disabled", policy: "normal", supportsSteering: false },
+      { hooks: "disabled", policy: "normal", supportsSteering: true },
       { hooks: "optional", policy: "normal", supportsSteering: true },
       { hooks: "disabled", policy: "token-sharing", supportsSteering: true },
       { hooks: "disabled", policy: "report-only", supportsSteering: true },
-      { hooks: "disabled", policy: "tool-search-unsupported", supportsSteering: false },
+      { hooks: "disabled", policy: "tool-search-unsupported", supportsSteering: true },
     ] as const) {
       registered.mockClear();
       const params = participantParams(`participant-handle-${hooks}-${policy}`);

@@ -9,7 +9,6 @@ import {
   notifyNativeModelSourceWaiters,
 } from "./native-subagent-model-source.js";
 import type {
-  ChildState,
   NativeModelBinding,
   NativeModelSource,
   NativePendingChild,
@@ -65,35 +64,6 @@ type ParentDependencies = {
   pendingChildren: (state: ParentState) => NativePendingChild[];
   interruptModelExecution?: (threadId: string, turnId: string) => void;
 };
-
-export function hasNativeChildrenForParent(
-  children: Iterable<ChildState>,
-  parentThreadId: string,
-): boolean {
-  for (const childState of children) {
-    if (childState.parentThreadId === parentThreadId) {
-      return true;
-    }
-  }
-  return false;
-}
-
-export function releaseNativeParentThreadIfChildrenTerminal(
-  children: Iterable<ChildState>,
-  retentions: Map<string, () => void>,
-  parentThreadId: string,
-): void {
-  for (const child of children) {
-    if (child.parentThreadId === parentThreadId && !child.terminal) {
-      return;
-    }
-  }
-  // Delivery retries keep their own custody after execution ends. Their pending
-  // results must not prevent the parent from resuming to receive them.
-  const release = retentions.get(parentThreadId);
-  retentions.delete(parentThreadId);
-  release?.();
-}
 
 export function canNativeParentConsumeCompletion(state: ParentState, turnId?: string): boolean {
   if (

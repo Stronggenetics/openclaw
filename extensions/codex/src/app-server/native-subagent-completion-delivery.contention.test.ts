@@ -150,7 +150,6 @@ describe("native completion settlement", () => {
       const releasePin = vi.fn();
       const monitor = new CodexNativeSubagentMonitor(client.client, runtime, {
         recoveryPollDelaysMs: [],
-        completionDeliveryRetryDelaysMs: [10],
         retainParentThread: () => releasePin,
       });
       const parent = await registerParent(monitor);
@@ -185,7 +184,7 @@ describe("native completion settlement", () => {
               result,
             }),
           );
-          // A receipt cannot revoke delivery admission while its accepted handoff is in flight.
+          // A receipt cannot revoke admission while its accepted handoff is in flight.
           expect(canAdmit?.()).toBe(true);
           expect(releasePin).toHaveBeenCalledOnce();
         }
@@ -199,7 +198,7 @@ describe("native completion settlement", () => {
           expect(observer?.listPendingChildren()).toMatchObject([{ state: "completing" }]);
           expect(vi.getTimerCount()).toBe(1);
           await observer?.unregister();
-          await vi.advanceTimersByTimeAsync(10);
+          await vi.advanceTimersByTimeAsync(5_000);
           expect(runtime.deliverAgentHarnessCompletion).toHaveBeenCalledTimes(2);
           expect(runtime.deliverAgentHarnessCompletion).toHaveBeenLastCalledWith(
             expect.objectContaining({ result }),

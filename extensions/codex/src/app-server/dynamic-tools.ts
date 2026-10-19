@@ -22,6 +22,7 @@ import {
   readToolOperatorHint,
   resolveToolExecutionErrorKind,
   readEmbeddedMessageDeliveryFact,
+  resolveMessageToolSourceReplyFinal,
   runAgentHarnessAfterToolCallHook,
   sanitizeToolResult,
   type AnyAgentTool,
@@ -100,6 +101,7 @@ type CodexDynamicToolHookContext = CodexDynamicToolHookContextBase & {
   replyToMode?: "off" | "first" | "all" | "batched";
   hasRepliedRef?: { value: boolean };
   sourceReplyDeliveryMode?: EmbeddedRunAttemptParams["sourceReplyDeliveryMode"];
+  messageToolFinalByDefault?: boolean;
 };
 
 type CodexToolResultHookContext = Pick<
@@ -465,7 +467,12 @@ export function createCodexDynamicToolBridge(params: {
                 deliveredPayload: rawResult,
               }),
             });
-          finalSourceReplyDelivered = deliveredSourceReply && executedArgs.final !== false;
+          finalSourceReplyDelivered =
+            deliveredSourceReply &&
+            resolveMessageToolSourceReplyFinal(
+              executedArgs,
+              params.hookContext?.messageToolFinalByDefault,
+            );
           telemetry.finalSourceReplyDelivered ||= finalSourceReplyDelivered || undefined;
           // Delivery is committed before result middleware; presentation changes
           // cannot erase the source owner's confirmation or infer a new one.
@@ -581,6 +588,7 @@ export function createCodexDynamicToolBridge(params: {
             result,
             deliveredSourceReply,
             executedArgs,
+            finalByDefault: params.hookContext?.messageToolFinalByDefault,
             runId: toolResultHookContext.runId,
             response,
           });

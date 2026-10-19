@@ -692,11 +692,17 @@ whether it is outside the state directory, inside a workspace, or nested under
 an otherwise regenerable managed state root. `--no-include-workspace` omits
 ordinary workspace sources, not configured agent directories.
 
+State-only archives also omit registered managed chat worktrees, including
+pending or recovering allocations and live worktrees under a previous
+`worktreeRoot`. Only recorded checkout paths are excluded; neighboring files and
+paths from removed registrations remain eligible. Config, credentials, and
+agent databases nested inside an excluded checkout remain included.
+
 `--only-config` skips state, agent, credentials-directory, workspace, and
 plugin-resource discovery and archives only the active config file path.
 
 OpenClaw first plans resources from configuration. It captures the root SQLite
-database online, then derives and freezes registered-agent ownership from that
+database online, then derives registered-agent ownership from that
 private snapshot for database discovery and archive traversal. Paths are resolved before comparison: config, credentials, workspaces, and agents
 already covered by another included root are not duplicated as top-level
 sources. A custom agent root becomes a distinct `agent` asset only when no

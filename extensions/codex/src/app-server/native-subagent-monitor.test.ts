@@ -630,9 +630,7 @@ describe("CodexNativeSubagentMonitor", () => {
       runtime.deliverAgentHarnessCompletion
         .mockResolvedValueOnce({ delivered: false, path: "direct", error: "pending" })
         .mockResolvedValueOnce({ delivered: true, path: "direct" });
-      const monitor = new CodexNativeSubagentMonitor(client as never, runtime, {
-        completionDeliveryRetryDelaysMs: [10],
-      });
+      const monitor = new CodexNativeSubagentMonitor(client as never, runtime);
       await registerDetachedChild(client, monitor);
       await client.notify(nativeCompletionNotification());
 
@@ -641,7 +639,7 @@ describe("CodexNativeSubagentMonitor", () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(runtime.deliverAgentHarnessCompletion).toHaveBeenCalledTimes(1);
 
-      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(5_000);
       expect(runtime.deliverAgentHarnessCompletion).toHaveBeenCalledTimes(1);
       await parent.unregister();
       expect(runtime.deliverAgentHarnessCompletion).toHaveBeenCalledTimes(2);
@@ -693,7 +691,6 @@ describe("CodexNativeSubagentMonitor", () => {
     const monitor = new CodexNativeSubagentMonitor(client.client, runtime, {
       retainParentThread: (id) => protectCodexAppServerLiveThread(client.client, id),
       recoveryPollDelaysMs: [],
-      completionDeliveryRetryDelaysMs: [10],
     });
     try {
       const parent = await registerParent(monitor);
@@ -719,11 +716,11 @@ describe("CodexNativeSubagentMonitor", () => {
       expect(runtime.deliverAgentHarnessCompletion).toHaveBeenCalledTimes(2);
       runtime.deliverAgentHarnessCompletion.mockResolvedValue({ delivered: true, path: "direct" });
       await resumed.unregister();
-      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(5_000);
       expect(
         runtime.deliverAgentHarnessCompletion.mock.calls.map(([request]) => request.result),
       ).toEqual(["A", "B", "A", "B"]);
-      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(5_000);
       expect(runtime.deliverAgentHarnessCompletion).toHaveBeenCalledTimes(4);
     } finally {
       await monitor.dispose();
