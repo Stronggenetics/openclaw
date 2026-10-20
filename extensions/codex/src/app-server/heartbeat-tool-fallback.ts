@@ -22,18 +22,24 @@ export function resolveInactiveCodexHeartbeatResponseDescriptor(params: {
   registeredTools: readonly CodexToolDescriptor[];
   registeredSpecs?: readonly CodexDynamicToolSpec[];
 }): InactiveCodexHeartbeatResponseDescriptor | undefined {
-  const descriptor = params.registeredSpecs
+  const native = params.registeredSpecs
     ? flattenCodexDynamicToolFunctions(params.registeredSpecs).find(
         (tool) => tool.name === HEARTBEAT_RESPONSE_TOOL_NAME,
       )
-    : projectCodexDynamicTools(
-        params.registeredTools.filter((tool) => tool.name === HEARTBEAT_RESPONSE_TOOL_NAME),
-      ).tools[0];
-  return descriptor
+    : undefined;
+  const descriptor = params.registeredSpecs
+    ? native && {
+        name: native.name,
+        description: native.description,
+        parameters: native.inputSchema,
+      }
+    : params.registeredTools.find((tool) => tool.name === HEARTBEAT_RESPONSE_TOOL_NAME);
+  const projected = projectCodexDynamicTools(descriptor ? [descriptor] : []).tools[0];
+  return projected
     ? {
-        name: descriptor.name,
-        description: descriptor.description,
-        inputSchema: descriptor.inputSchema,
+        name: projected.name,
+        description: projected.description,
+        inputSchema: projected.inputSchema,
       }
     : undefined;
 }
