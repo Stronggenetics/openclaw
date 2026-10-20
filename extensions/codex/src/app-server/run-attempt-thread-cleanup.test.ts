@@ -8,6 +8,8 @@ import {
 } from "openclaw/plugin-sdk/runtime-config-snapshot";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { readAttemptTerminal } from "./attempt-terminal.test-helper.js";
+import { resolveCodexAppServerHomeDir } from "./auth-start-options.js";
+import { protectCodexAppServerLiveThread } from "./client-runtime.js";
 import { CodexAppServerClient } from "./client.js";
 import { CodexAppServerEventProjector } from "./event-projector.js";
 import { isJsonObject } from "./protocol.js";
@@ -58,7 +60,7 @@ function multiplexedClientFactory(
 }
 
 // Cleanup tests keep lifecycle RPCs manual while allowing each native policy preflight.
-function createNativeCleanupClientHarness() {
+function createNativeCleanupClientHarness(thread?: ReturnType<typeof threadStartResult>["thread"]) {
   return createInferenceReadyClientHarness({
     onWrite: (line, send) => {
       const request: unknown = JSON.parse(line);
@@ -68,6 +70,13 @@ function createNativeCleanupClientHarness() {
         request.method === "configRequirements/read"
       ) {
         send({ id: request.id, result: { requirements: null } });
+      } else if (
+        isJsonObject(request) &&
+        request.id !== undefined &&
+        request.method === "thread/read" &&
+        thread
+      ) {
+        send({ id: request.id, result: { thread } });
       }
     },
   });
@@ -465,15 +474,18 @@ describe("Codex app-server main thread cleanup", () => {
     }
   });
 
-  it("keeps an incognito thread subscribed for live in-process reuse", async () => {
+  it.each([false, true])("reuses pathless incognito (protected: %s)", async (protectedThread) => {
     const sessionFile = path.join(tempDir, "incognito-session.jsonl");
     const workspaceDir = path.join(tempDir, "incognito-workspace");
     const sessionKey = "agent:main:dashboard:incognito-live-thread";
     // Dashboard incognito sessions keep an authoritative row in process-held SQLite.
     await seedRunSessionOwnerForTest("session-1", sessionKey);
-    const harness = createNativeCleanupClientHarness();
+    const native = threadStartResult();
+    native.thread.ephemeral = true;
+    const harness = createNativeCleanupClientHarness(native.thread);
     vi.spyOn(CodexAppServerClient, "start").mockResolvedValueOnce(harness.client);
     const params = createParams(sessionFile, workspaceDir, sessionKey);
+    params.agentDir = path.join(tempDir, "incognito-agent");
     params.disableTools = false;
     const run = runCodexAppServerAttempt(params, {
       bindingStore: testCodexAppServerBindingStore,
@@ -481,13 +493,17 @@ describe("Codex app-server main thread cleanup", () => {
     const initialize = await waitForHarnessRequest(harness, "initialize");
     harness.send({
       id: initialize.id,
-      result: { userAgent: `openclaw/${CODEX_APP_SERVER_VERSION} (macOS; test)` },
+      result: {
+        userAgent: `openclaw/${CODEX_APP_SERVER_VERSION} (macOS; test)`,
+        codexHome: resolveCodexAppServerHomeDir(params.agentDir),
+      },
     });
     const capabilities = await waitForHarnessRequest(harness, "modelProvider/capabilities/read");
     harness.send({ id: capabilities.id, result: { imageGeneration: false, webSearch: true } });
     const start = await waitForHarnessRequest(harness, "thread/start");
     expect(start.params).toEqual(expect.objectContaining({ ephemeral: true }));
-    harness.send({ id: start.id, result: threadStartResult() });
+    expect(native.thread.path).toBeNull();
+    harness.send({ id: start.id, result: native });
     const turn = await waitForHarnessRequest(harness, "turn/start");
     harness.send({ id: turn.id, result: turnStartResult() });
     harness.send({
@@ -505,6 +521,34 @@ describe("Codex app-server main thread cleanup", () => {
       threadId: "thread-1",
       clientId: harness.client.getInstanceId(),
     });
+
+    // Native children and background commands retain this same protection owner.
+    const unprotect = protectedThread
+      ? protectCodexAppServerLiveThread(harness.client, "thread-1")
+      : undefined;
+    const continuationStart = harness.writes.length;
+    try {
+      const next = runCodexAppServerAttempt({ ...params, runId: "incognito-next" });
+      const nextTurn = await Promise.race([
+        waitForHarnessRequest(harness, "turn/start", continuationStart),
+        next.then(() => {
+          throw new Error("Incognito continuation settled without a turn");
+        }),
+      ]);
+      harness.send({ id: nextTurn.id, result: turnStartResult("turn-2") });
+      await next.waitForTurnAccepted();
+      harness.send(turnCompleted({ id: "turn-2", status: "completed" }));
+      expect(readAttemptTerminal(await next)).toMatchObject({ aborted: false, timedOut: false });
+      const methods = harness.writes
+        .slice(continuationStart)
+        .map((line) => JSON.parse(line).method);
+      expect(methods).not.toContain("thread/read");
+      expect(methods).not.toContain("thread/start");
+      expect(methods).not.toContain("thread/resume");
+      expect(methods).not.toContain("thread/unsubscribe");
+    } finally {
+      unprotect?.();
+    }
 
     const requestStart = harness.writes.length;
     const retirement = retireCodexAppServerSessionGeneration({

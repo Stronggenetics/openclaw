@@ -2,6 +2,7 @@ import path from "node:path";
 import { initializeGlobalHookRunner } from "openclaw/plugin-sdk/hook-runtime";
 import { createMockPluginRegistry } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { describe, expect, it } from "vitest";
+import { resolveCodexAppServerHomeDir } from "./auth-start-options.js";
 import { isCodexAppServerLiveThreadProtected } from "./client-runtime.js";
 import { CODEX_INFERENCE_GENERATION_KEY } from "./inference-context.js";
 import { getCodexInferenceThread, ownCodexInferenceClient } from "./inference-routing.js";
@@ -13,7 +14,9 @@ import {
   runCodexAppServerAttempt,
   setupRunAttemptTestHooks,
   tempDir,
+  threadStartResult,
 } from "./run-attempt-test-harness.js";
+import { writeNativeCatalogFixture } from "./thread-lifecycle.test-fixtures.js";
 
 setupRunAttemptTestHooks();
 
@@ -48,8 +51,19 @@ describe("prompt hook context with native background commands", () => {
       exitCode: null,
       durationMs: null,
     };
+    const agentDir = path.join(tempDir, "agent");
+    const codexHome = resolveCodexAppServerHomeDir(agentDir);
     const harness = createStartedThreadHarness(
       async (method, request) => {
+        if (method === "thread/start") {
+          if (!isJsonObject(request)) {
+            throw new Error("Missing native thread creation request");
+          }
+          const rolloutPath = path.join(codexHome, "sessions", "rollout-thread-1.jsonl");
+          await writeNativeCatalogFixture(rolloutPath, "thread-1", request.dynamicTools);
+          const response = threadStartResult();
+          return { ...response, thread: { ...response.thread, path: rolloutPath } };
+        }
         if (method === "account/read") {
           return { account: { type: "apiKey" } };
         }
@@ -93,7 +107,7 @@ describe("prompt hook context with native background commands", () => {
         }
         return undefined;
       },
-      { persistedThreads: [] },
+      { persistedThreads: [], codexHome },
     );
     ownCodexInferenceClient(harness.client);
     const unsubscribe = { method: "thread/unsubscribe", params: { threadId: "thread-1" } };
@@ -104,6 +118,7 @@ describe("prompt hook context with native background commands", () => {
           runId: `run-${index}`,
           prompt: index === 0 ? "Start a callback listener" : "Explain the callback setup",
         });
+        params.agentDir = agentDir;
         params.skillsSnapshot = {
           prompt:
             "<available_skills><skill><name>synthetic-skill</name></skill></available_skills>",
@@ -155,11 +170,13 @@ describe("prompt hook context with native background commands", () => {
       }
       expect(received[1]).not.toContain("Synthetic first-turn recall");
       systemPrompt = "Changed persistent thread policy";
-      await expect(
-        runCodexAppServerAttempt(
-          createParams(path.join(tempDir, "session.jsonl"), tempDir, { runId: "changed-policy" }),
-        ),
-      ).rejects.toThrow("Codex thread thread-1 is claimed by active work; stop it first.");
+      const changedPolicy = createParams(path.join(tempDir, "session.jsonl"), tempDir, {
+        runId: "changed-policy",
+      });
+      changedPolicy.agentDir = agentDir;
+      await expect(runCodexAppServerAttempt(changedPolicy)).rejects.toThrow(
+        "Codex thread thread-1 is claimed by active work; stop it first.",
+      );
       expect(isCodexAppServerLiveThreadProtected(harness.client, "thread-1")).toBe(true);
       expect(harness.requests).not.toContainEqual(unsubscribe);
       expect(

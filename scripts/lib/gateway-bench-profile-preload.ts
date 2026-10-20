@@ -69,6 +69,10 @@ if (isMainThread) {
     GatewayProfileCommand["kind"],
     ReturnType<typeof getWorkerMessageMetrics>
   >();
+  const namedDiagnostics = new Map<
+    string | undefined,
+    ReturnType<typeof startGatewayBenchDiagnostics>
+  >();
   let busy = false;
   process.on("message", (message: GatewayBenchCommand) => {
     if (message?.channel !== GATEWAY_PROFILE_CHANNEL) {
@@ -121,8 +125,36 @@ if (isMainThread) {
         kind: message.kind,
         action: message.action,
         error,
+        ...(message.kind === "diagnostics" ? { captureId: message.captureId } : {}),
       });
     };
+    if (message.kind === "diagnostics") {
+      const captureId = message.captureId;
+      if (message.action === "start") {
+        if (namedDiagnostics.has(captureId)) {
+          reply("Gateway diagnostics already started");
+          return;
+        }
+        namedDiagnostics.set(captureId, startGatewayBenchDiagnostics());
+        reply();
+      } else {
+        const stopDiagnostics = namedDiagnostics.get(captureId);
+        if (!stopDiagnostics) {
+          reply("Gateway diagnostics have not started");
+          return;
+        }
+        const result = stopDiagnostics();
+        namedDiagnostics.delete(captureId);
+        process.send?.({
+          channel: GATEWAY_PROFILE_CHANNEL,
+          kind: message.kind,
+          action: message.action,
+          diagnostics: result,
+          captureId: message.captureId,
+        });
+      }
+      return;
+    }
     if (busy) {
       reply("Gateway profile command already in progress");
       return;
@@ -147,12 +179,11 @@ if (isMainThread) {
           });
           await inspector.post("Profiler.start");
         } else {
-          // Include dead allocations as well as survivors: retained heap alone
-          // misses the short-lived objects that cause busy-Gateway GC pressure.
+          // Churn includes dead allocations; retention captures only survivors.
           const options = {
             samplingInterval: GATEWAY_HEAP_SAMPLE_INTERVAL,
-            includeObjectsCollectedByMajorGC: true,
-            includeObjectsCollectedByMinorGC: true,
+            includeObjectsCollectedByMajorGC: message.includeCollectedObjects ?? true,
+            includeObjectsCollectedByMinorGC: message.includeCollectedObjects ?? true,
           };
           await inspector.post("HeapProfiler.startSampling", options);
         }
@@ -219,6 +250,10 @@ if (isMainThread) {
     );
   });
   process.once("disconnect", () => {
+    for (const finish of namedDiagnostics.values()) {
+      finish();
+    }
+    namedDiagnostics.clear();
     for (const finish of diagnosticCaptures.values()) {
       finish();
     }

@@ -118,72 +118,68 @@ describe("Codex direct tool loading", () => {
     expect(tool.execute).not.toHaveBeenCalled();
   });
 
-  it.each(["current", "fallback"] as const)(
-    "executes only fresh matching definitions from an accepted catalog through %s tools",
-    async (source) => {
-      const originalTools = ["unchanged", "description_changed", "schema_changed", "removed"].map(
-        createRuntimeDynamicTool,
-      );
-      const registeredSpecs = createCodexDynamicToolBridge({
-        tools: originalTools,
-        signal: new AbortController().signal,
-      }).specs;
-      const acceptedCatalog = JSON.stringify(registeredSpecs);
-      const unchanged = createRuntimeDynamicTool("unchanged");
-      vi.mocked(unchanged.execute).mockResolvedValue({
-        content: [{ type: "text", text: "fresh executor" }],
-        details: {},
-      });
-      const descriptionChanged = createRuntimeDynamicTool("description_changed");
-      descriptionChanged.description = "Different tool contract";
-      const schemaChanged = createRuntimeDynamicTool("schema_changed");
-      schemaChanged.parameters = {
-        type: "object",
-        properties: { optional: { type: "string" } },
-        additionalProperties: false,
-      };
-      const added = createRuntimeDynamicTool("added");
-      const currentTools = [unchanged, descriptionChanged, schemaChanged, added];
-      const params = {
-        tools: source === "current" ? currentTools : [],
-        registeredFallbackTools: source === "fallback" ? currentTools : [],
-        registeredSpecs,
-        requireExactRegisteredDefinitions: true,
-        signal: new AbortController().signal,
-      };
-      const bridge = createCodexDynamicToolBridge(params);
-      expect(JSON.stringify(bridge.specs)).toBe(acceptedCatalog);
+  it("executes only fresh matching definitions from an accepted catalog", async () => {
+    const originalTools = ["unchanged", "description_changed", "schema_changed", "removed"].map(
+      createRuntimeDynamicTool,
+    );
+    const registeredSpecs = createCodexDynamicToolBridge({
+      tools: originalTools,
+      signal: new AbortController().signal,
+    }).specs;
+    const acceptedCatalog = JSON.stringify(registeredSpecs);
+    const unchanged = createRuntimeDynamicTool("unchanged");
+    vi.mocked(unchanged.execute).mockResolvedValue({
+      content: [{ type: "text", text: "fresh executor" }],
+      details: {},
+    });
+    const descriptionChanged = createRuntimeDynamicTool("description_changed");
+    descriptionChanged.description = "Different tool contract";
+    const schemaChanged = createRuntimeDynamicTool("schema_changed");
+    schemaChanged.parameters = {
+      type: "object",
+      properties: { optional: { type: "string" } },
+      additionalProperties: false,
+    };
+    const added = createRuntimeDynamicTool("added");
+    const currentTools = [unchanged, descriptionChanged, schemaChanged, added];
+    const params = {
+      tools: currentTools,
+      registeredSpecs,
+      requireExactRegisteredDefinitions: true,
+      signal: new AbortController().signal,
+    };
+    const bridge = createCodexDynamicToolBridge(params);
+    expect(JSON.stringify(bridge.specs)).toBe(acceptedCatalog);
 
-      for (const tool of ["removed", "added", "description_changed", "schema_changed"]) {
-        const result = await bridge.handleToolCall({
-          threadId: "retained-parent",
-          turnId: "next-turn",
-          callId: `denied-${tool}`,
-          namespace: "openclaw",
-          tool,
-          arguments: {},
-        });
-        expect(result).toMatchObject({ success: false, executionStarted: false });
-      }
+    for (const tool of ["removed", "added", "description_changed", "schema_changed"]) {
       const result = await bridge.handleToolCall({
         threadId: "retained-parent",
         turnId: "next-turn",
-        callId: "fresh-unchanged",
+        callId: `denied-${tool}`,
         namespace: "openclaw",
-        tool: "unchanged",
+        tool,
         arguments: {},
       });
-      expect(result).toMatchObject({
-        success: true,
-        contentItems: [{ type: "inputText", text: "fresh executor" }],
-      });
-      expect(unchanged.execute).toHaveBeenCalledTimes(1);
-      for (const tool of [...originalTools, descriptionChanged, schemaChanged, added]) {
-        expect(tool.execute).not.toHaveBeenCalled();
-      }
-      expect(JSON.stringify(bridge.specs)).toBe(acceptedCatalog);
-    },
-  );
+      expect(result).toMatchObject({ success: false, executionStarted: false });
+    }
+    const result = await bridge.handleToolCall({
+      threadId: "retained-parent",
+      turnId: "next-turn",
+      callId: "fresh-unchanged",
+      namespace: "openclaw",
+      tool: "unchanged",
+      arguments: {},
+    });
+    expect(result).toMatchObject({
+      success: true,
+      contentItems: [{ type: "inputText", text: "fresh executor" }],
+    });
+    expect(unchanged.execute).toHaveBeenCalledTimes(1);
+    for (const tool of [...originalTools, descriptionChanged, schemaChanged, added]) {
+      expect(tool.execute).not.toHaveBeenCalled();
+    }
+    expect(JSON.stringify(bridge.specs)).toBe(acceptedCatalog);
+  });
 });
 
 it("keeps OpenClaw control-path tools direct when code-mode-only is enabled", () => {

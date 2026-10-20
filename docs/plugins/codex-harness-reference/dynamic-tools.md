@@ -59,6 +59,17 @@ to managed workers. Explicit ACP delegation still uses `sessions_spawn`.
 Message-tool-only source replies also stay direct, since that is a
 turn-control contract.
 
+While native work protects a local, persistent managed thread, OpenClaw keeps
+the tool catalog that Codex accepted. New declarations wait until the thread can
+be replaced while idle. Each turn binds fresh executors only when their finalized
+schema and description match the accepted declaration; current permissions still
+control execution. Changed or removed tools remain unavailable for that turn.
+
+Managed incognito threads have no native rollout to read. They keep their existing live
+subscription and creation-policy checks: an unchanged follow-up can continue while
+native work is active, but incompatible policy changes still refuse without
+replacing the protected conversation.
+
 Codex Code Mode projects generic OpenClaw dynamic-tool results as text. Parse a
 JSON result before reading fields. Nested dynamic calls are serialized by the
 Codex runtime, so `Promise.all` does not submit them concurrently; use a

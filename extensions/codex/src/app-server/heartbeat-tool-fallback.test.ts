@@ -1,5 +1,5 @@
 import { ok } from "node:assert/strict";
-import type { AnyAgentTool } from "openclaw/plugin-sdk/agent-harness";
+import { createOpenClawCodingTools, type AnyAgentTool } from "openclaw/plugin-sdk/agent-harness";
 import { HEARTBEAT_RESPONSE_TOOL_NAME } from "openclaw/plugin-sdk/agent-harness-runtime";
 import {
   initializeGlobalHookRunner,
@@ -42,15 +42,6 @@ function createBridge(options: Partial<Parameters<typeof createCodexDynamicToolB
   });
 }
 
-function nativeSpec(name: string): CodexDynamicToolSpec {
-  return {
-    type: "function",
-    name,
-    description: `Test ${name}`,
-    inputSchema: { type: "object", properties: {}, additionalProperties: true },
-  };
-}
-
 function heartbeatCall(notify: boolean) {
   return {
     threadId: "thread-1",
@@ -67,7 +58,9 @@ function heartbeatCall(notify: boolean) {
   } as const;
 }
 
-function fallbackTool(descriptor: Parameters<typeof selectFallback>[0]["descriptor"]) {
+function fallbackTool(registeredTool: AnyAgentTool) {
+  const descriptor = resolveDescriptor({ registeredTools: [registeredTool] });
+  ok(descriptor, "heartbeat declaration was not resolved");
   const fallback = selectFallback({ descriptor, pluginConfig: {} });
   ok(fallback, "inactive heartbeat fallback was not selected");
   return fallback;
@@ -115,8 +108,10 @@ describe("inactive Codex heartbeat endpoint", () => {
     ["excluded by allowlist", { toolsAllow: ["message"] }, false],
     ["explicitly allowed", { toolsAllow: [HEARTBEAT_RESPONSE_TOOL_NAME] }, true],
   ])("honors current turn restrictions when %s", (_label, restrictions, expected) => {
+    const descriptor = resolveDescriptor({ registeredTools: [tool(heartbeatName)] });
+    ok(descriptor, "heartbeat declaration was not resolved");
     const selected = selectFallback({
-      descriptor: tool(heartbeatName),
+      descriptor,
       ...restrictions,
       pluginConfig: {},
     });
@@ -190,7 +185,17 @@ describe("inactive Codex heartbeat endpoint", () => {
   );
 
   it.each([false, true])("honors inherited catalog with exclusion=%s", async (excluded) => {
-    const nativeSpecs = (excluded ? [heartbeatName] : [heartbeatName, "message"]).map(nativeSpec);
+    const heartbeat = createOpenClawCodingTools({
+      sessionKey: "agent:main:main",
+      runId: "accepted-heartbeat",
+      forceHeartbeatTool: true,
+      config: { tools: { profile: "coding" } },
+    }).find((entry) => entry.name === heartbeatName);
+    ok(heartbeat, "heartbeat declaration was not offered");
+    const nativeSpecs = createBridge({
+      tools: excluded ? [heartbeat] : [tool(), heartbeat],
+      registeredTools: undefined,
+    }).specs;
     const descriptor = resolveDescriptor({
       registeredTools: [],
       registeredSpecs: nativeSpecs,
@@ -204,6 +209,7 @@ describe("inactive Codex heartbeat endpoint", () => {
       ...(excluded ? { tools: [] } : {}),
       registeredTools: [],
       registeredSpecs: nativeSpecs,
+      requireExactRegisteredDefinitions: true,
       registeredFallbackTools: fallback ? [fallback] : [],
     });
 
@@ -217,6 +223,11 @@ describe("inactive Codex heartbeat endpoint", () => {
       expect(bridge.specs).toEqual(nativeSpecs);
       expect(specNames(bridge.availableSpecs)).toEqual(["message"]);
       expect(bridge.availableTools.map((entry) => entry.name)).toEqual(["message"]);
+      const notification = await bridge.handleToolCall(heartbeatCall(true));
+      expectResult(notification, { success: false });
+      expect(JSON.stringify(notification.contentItems)).toContain(
+        "heartbeat_respond cannot send notifications outside a heartbeat turn",
+      );
     }
   });
 

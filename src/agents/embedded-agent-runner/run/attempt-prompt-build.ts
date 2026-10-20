@@ -157,6 +157,7 @@ export async function prepareEmbeddedAttemptPromptAssembly(input: {
     activeProjectKeys: [...(attempt.preparedModelRuntime?.activeProjectKeys ?? [])],
     modelProviderId: attempt.model.provider,
     modelId: attempt.model.id,
+    contextTokenBudget: attempt.contextTokenBudget ?? attempt.model.contextWindow,
     inputProvenance: attempt.inputProvenance,
   };
   const promptBuildMessages = input.activeSession.messages;
@@ -257,9 +258,7 @@ export async function prepareEmbeddedAttemptPromptAssembly(input: {
       assertActive: assertHostActive,
       supportsTurnScopedToolRestrictions: attempt.supportsTurnScopedToolRestrictions,
     });
-    if (decisionPrefilter.shouldPruneTools) {
-      decisionPrefilter.restrictionApplied = true;
-    }
+    decisionPrefilter.restrictionApplied = decisionPrefilter.shouldPruneTools;
   }
   activeAbortSignal?.throwIfAborted();
   assertHostActive?.();

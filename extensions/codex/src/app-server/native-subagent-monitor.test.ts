@@ -5,7 +5,6 @@ import {
   consumeCodexAppServerLiveThread,
   ensureCodexAppServerClientRuntime,
   isCodexAppServerLiveThreadClaimed,
-  protectCodexAppServerLiveThread,
   releaseCodexAppServerLiveThread,
   retainCodexAppServerLiveThread,
 } from "./client-runtime.js";
@@ -26,8 +25,6 @@ import {
   threadRead,
 } from "./native-subagent-monitor.test-support.js";
 import type { JsonObject } from "./protocol.js";
-import { createCodexThreadLifecycleTimingTracker } from "./thread-lifecycle-timing.js";
-import { releaseCodexBoundLiveThread } from "./thread-lifecycle-warm.js";
 
 function createFixture(options?: ConstructorParameters<typeof CodexNativeSubagentMonitor>[2]) {
   const client = createClient();
@@ -675,58 +672,6 @@ describe("CodexNativeSubagentMonitor", () => {
     await monitor.dispose();
     expect(releaseParentThread).toHaveBeenCalledOnce();
     client.close();
-  });
-
-  it("unprotects terminal children’s parent while preserving pending completion delivery", async () => {
-    vi.useFakeTimers();
-    const client = createClient();
-    const runtime = createRuntime();
-    runtime.deliverAgentHarnessCompletion.mockResolvedValue({
-      delivered: false,
-      path: "direct",
-      recoveryPending: true,
-    });
-    ensureCodexAppServerClientRuntime(client.client, { agentDir: "/tmp/agent" });
-    await retainCodexAppServerLiveThread(client.client, "parent-thread");
-    const monitor = new CodexNativeSubagentMonitor(client.client, runtime, {
-      retainParentThread: (id) => protectCodexAppServerLiveThread(client.client, id),
-      recoveryPollDelaysMs: [],
-    });
-    try {
-      const parent = await registerParent(monitor);
-      await notifyChildStarted(client, "parent-thread", "child-a");
-      await notifyChildStarted(client, "parent-thread", "child-b");
-      await parent.unregister();
-      const releaseParent = () =>
-        releaseCodexBoundLiveThread({
-          client: client.client,
-          threadId: "parent-thread",
-          lifecycleTiming: createCodexThreadLifecycleTimingTracker(),
-        });
-      await client.notify(nativeCompletionNotification({ agentPath: "child-a", result: "A" }));
-      await expect(releaseParent()).rejects.toThrow("claimed by active work");
-      expect(client.request.mock.calls.some(([method]) => method === "thread/unsubscribe")).toBe(
-        false,
-      );
-      await client.notify(nativeCompletionNotification({ agentPath: "child-b", result: "B" }));
-      await expect(releaseParent()).resolves.toBe(true);
-
-      // Releasing native protection must preserve both results and their retry owner.
-      const resumed = await registerParent(monitor);
-      expect(runtime.deliverAgentHarnessCompletion).toHaveBeenCalledTimes(2);
-      runtime.deliverAgentHarnessCompletion.mockResolvedValue({ delivered: true, path: "direct" });
-      await resumed.unregister();
-      await vi.advanceTimersByTimeAsync(5_000);
-      expect(
-        runtime.deliverAgentHarnessCompletion.mock.calls.map(([request]) => request.result),
-      ).toEqual(["A", "B", "A", "B"]);
-      await vi.advanceTimersByTimeAsync(5_000);
-      expect(runtime.deliverAgentHarnessCompletion).toHaveBeenCalledTimes(4);
-    } finally {
-      await monitor.dispose();
-      client.close();
-      vi.useRealTimers();
-    }
   });
 
   it("releases a completed native child when its full idle pool cannot evict its oldest owner", async () => {

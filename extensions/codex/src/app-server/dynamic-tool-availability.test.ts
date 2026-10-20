@@ -97,13 +97,9 @@ describe("Codex collector availability", () => {
     },
   );
 
-  it.each(
-    (["current", "fallback"] as const).flatMap((source) =>
-      [false, true].map((readerChanged) => ({ source, readerChanged })),
-    ),
-  )(
-    "rechecks $source collector definitions after finalization (reader changed: $readerChanged)",
-    async ({ source, readerChanged }) => {
+  it.each([false, true])(
+    "rechecks collector definitions after finalization (reader changed: %s)",
+    async (readerChanged) => {
       const accepted = createCodexDynamicToolBridge({
         tools: createCollectorTools(),
         loading: "direct",
@@ -123,8 +119,7 @@ describe("Codex collector availability", () => {
         reader.description = `${reader.description} Changed reader contract.`;
       }
       const bridge = createCodexDynamicToolBridge({
-        tools: source === "current" ? currentTools : [],
-        registeredFallbackTools: source === "fallback" ? currentTools : [],
+        tools: currentTools,
         registeredSpecs: accepted.specs,
         requireExactRegisteredDefinitions: true,
         loading: "direct",

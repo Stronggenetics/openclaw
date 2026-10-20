@@ -20,14 +20,16 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-it("permits parent cold resume once every child is terminal, while preserving undelivered results", async () => {
+it.each([false, true])("preserves results after parent release (%s)", async (recoveryPending) => {
   vi.useFakeTimers();
   const client = createClient();
   const runtime = createRuntime();
   runtime.deliverAgentHarnessCompletion.mockResolvedValue({
     delivered: false,
     path: "direct",
-    error: "requester temporarily unavailable",
+    ...(recoveryPending
+      ? { recoveryPending: true }
+      : { error: "requester temporarily unavailable" }),
   });
   ensureCodexAppServerClientRuntime(client.client, { agentDir: "/tmp/codex-parent-retention" });
   await retainCodexAppServerLiveThread(client.client, "parent-thread");
@@ -83,4 +85,6 @@ it("permits parent cold resume once every child is terminal, while preserving un
   expect(
     runtime.deliverAgentHarnessCompletion.mock.calls.map(([request]) => request.result),
   ).toEqual(["first result", "second result", "first result", "second result"]);
+  await vi.advanceTimersByTimeAsync(5_000);
+  expect(runtime.deliverAgentHarnessCompletion).toHaveBeenCalledTimes(4);
 });

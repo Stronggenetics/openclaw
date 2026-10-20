@@ -41,6 +41,7 @@ function hasProtectedManagedCatalog(
 export async function loadCodexAttemptNativeToolCatalog(
   params: Omit<Parameters<typeof loadCodexNativeToolCatalog>[0], "binding" | "client"> & {
     binding: CodexAppServerThreadBinding | undefined;
+    ephemeral?: boolean;
     signal: AbortSignal;
     acquireClient: () => Promise<CodexAppServerClient>;
     releaseClient: (client: CodexAppServerClient) => void;
@@ -60,7 +61,10 @@ export async function loadCodexAttemptNativeToolCatalog(
       params.releaseClient(client);
     }
   }
+  // Managed ephemeral threads have no rollout. Their retained live owner already
+  // enforces creation-policy stability without recovering declarations from disk.
   if (
+    params.ephemeral ||
     (params.appServer.start.transport !== "stdio" && params.appServer.start.transport !== "unix") ||
     params.appServer.remoteWorkspaceRoot
   ) {

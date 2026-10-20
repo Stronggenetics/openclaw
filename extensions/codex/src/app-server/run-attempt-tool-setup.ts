@@ -11,6 +11,7 @@ import {
   formatMcpCodexApprovalRemedy,
   materializeStaticMcpToolsForHarnessRun,
 } from "openclaw/plugin-sdk/codex-mcp-projection";
+import { isIncognitoSessionKey } from "openclaw/plugin-sdk/session-key-runtime";
 import { formatStageTimings } from "openclaw/plugin-sdk/time-runtime";
 import type { CodexComputerContextEpoch } from "./computer-context.js";
 import { resolveCodexPluginsPolicy, shouldAutoApproveCodexAppServerApprovals } from "./config.js";
@@ -268,6 +269,7 @@ export async function prepareCodexAttemptTools(runtime: CodexAttemptRuntime) {
   };
   const nativeSpecs = await loadCodexAttemptNativeToolCatalog({
     binding: mutable.startupBinding,
+    ephemeral: isIncognitoSessionKey(params.sessionKey),
     authority: connection.authority,
     appServer: connection.appServer,
     agentDir,
