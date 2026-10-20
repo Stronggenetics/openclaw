@@ -49,6 +49,7 @@ import { runSessionNavigationAction } from "../../lib/sessions/session-menu-navi
 import { readSystemInfo } from "../../lib/system-info.ts";
 import { showToast } from "../../lib/toast.ts";
 import { runControlUiPluginAction } from "../../plugins/control-ui-actions.ts";
+import { chatHistoryRequests } from "./chat-history-state.ts";
 import { ChatPaneContext } from "./chat-pane-context.ts";
 import { ChatPaneHeaderMemo } from "./chat-pane-header-memo.ts";
 import { headerSessionMetadataPatch } from "./chat-pane-session-metadata-patch.ts";
@@ -61,10 +62,17 @@ import { buildContinueInTerminalCommand } from "./continue-in-terminal-command.t
 export abstract class ChatPaneSessionMenu extends ChatPaneContext {
   private readonly headerSessionDataMemo = new ChatPaneHeaderMemo<SessionMenuData>();
   protected resolveHeaderSessionTitle(row: GatewaySessionRow | undefined): string {
+    const state = this.state;
+    const hydration = state && chatHistoryRequests(state).initialSnapshotHydration;
+    const session = row ?? this.resourceSessionObservation()?.row ?? undefined;
     return chatSessionPresentationTitle(
-      this.state,
-      row ?? this.transcriptSessionProps(row).transcriptMetadata,
+      state,
+      session ?? this.transcriptSessionProps(session).transcriptMetadata,
       this.sessionKey,
+      Boolean(
+        hydration?.titlePending &&
+        areUiSessionKeysEquivalent(hydration.sessionKey, this.sessionKey),
+      ),
     );
   }
 
@@ -654,34 +662,29 @@ export abstract class ChatPaneSessionMenu extends ChatPaneContext {
     await Promise.all(loads);
   }
 
-  protected showHeaderCopied(action: ChatPaneHeaderAction): void {
-    this.headerPresentation.copiedAction = action;
-    if (this.headerCopiedTimer !== null) {
-      window.clearTimeout(this.headerCopiedTimer);
-    }
-    this.headerCopiedTimer = window.setTimeout(() => {
-      this.headerPresentation.copiedAction = null;
-      this.headerCopiedTimer = null;
-    }, 1_500);
-  }
-
   protected handleHeaderMenuAction(
     action: ChatPaneHeaderAction,
     row: GatewaySessionRow,
     workspaceRoot: string | null,
     branch: string | null,
-    copy: (value: string) => Promise<boolean> = copyToClipboard,
   ): void {
     const copiedValue =
       action === "copy-path" ? workspaceRoot : action === "copy-branch" ? branch : null;
     if (copiedValue) {
       const owner = this.headerOutcomeOwner;
-      void copy(copiedValue).then((copied) => {
+      void copyToClipboard(copiedValue).then((copied) => {
         if (!this.ownsHeaderOutcome(owner)) {
           return;
         }
         if (copied) {
-          this.showHeaderCopied(action);
+          this.headerPresentation.copiedAction = action;
+          if (this.headerCopiedTimer !== null) {
+            window.clearTimeout(this.headerCopiedTimer);
+          }
+          this.headerCopiedTimer = window.setTimeout(() => {
+            this.headerPresentation.copiedAction = null;
+            this.headerCopiedTimer = null;
+          }, 1_500);
         } else {
           this.publishHeaderError(t("common.copyFailed"), owner);
         }

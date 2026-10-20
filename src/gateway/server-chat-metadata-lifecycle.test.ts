@@ -340,8 +340,7 @@ async function createRealMetadataLifecycle(
       skills: () => mocks.registerSkillsListener.mock.calls[0]![0]({ reason: "watch" }),
       auth: () => authEvent(),
       catalog: () => modelEvent({ phase: "catalog-published" }),
-      catalogFailure: () =>
-        modelEvent({ phase: "catalog-failed", error: new Error("catalog failed") }),
+      catalogFailure: () => modelEvent({ phase: "catalog-failed" }),
       owner: () => modelEvent({ phase: "invalidated" }),
     },
     async stop() {
@@ -363,7 +362,7 @@ describe("gateway chat metadata lifecycle", () => {
       const before = await harness.lifecycle.read({ agentId: "main" });
       harness.refresh.mockClear();
       harness.broadcast.mockClear();
-      notifySkillsWatchAvailable({ workspaceDir, sourceScope: {} });
+      notifySkillsWatchAvailable({ workspaceDir });
       expect(getSkillsSnapshotVersion(workspaceDir)).toBe(version);
       expect(await harness.lifecycle.read({ agentId: "main" })).toEqual(before);
       expect(harness.refresh).not.toHaveBeenCalled();
@@ -746,7 +745,7 @@ describe("gateway chat metadata lifecycle", () => {
         if (startup === "owner invalidated") {
           modelListener({ phase: "invalidated" });
           modelListener({ phase: "catalog-published" });
-          modelListener({ phase: "catalog-failed", error: new Error("obsolete catalog failed") });
+          modelListener({ phase: "catalog-failed" });
           authListener();
           skillsListener({ reason: "watch" });
           expect(mocks.refresh).toHaveBeenCalledOnce();

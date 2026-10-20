@@ -59,7 +59,7 @@ import {
 import {
   canManageChatSessionSharing,
   type ChatSessionSharingProps,
-} from "./components/chat-session-sharing.ts";
+} from "./components/chat-session-sharing.solid.tsx";
 import { hasDirectSessionRun } from "./run-lifecycle.ts";
 import { isSidebarSlotVisible, type SidebarLayout, type SidebarSlotId } from "./sidebar-layout.ts";
 
@@ -534,6 +534,9 @@ export abstract class ChatPaneHeader extends ChatPaneDiscussion {
       },
       false,
     );
+    const title =
+      (catalog ? this.history.catalogSession?.name?.trim() : undefined) ||
+      this.resolveHeaderSessionTitle(row);
     const header: ChatPaneHeaderProps = {
       onHeaderRef: this.registerHeaderElement,
       paneId: this.paneId,
@@ -542,9 +545,8 @@ export abstract class ChatPaneHeader extends ChatPaneDiscussion {
       mergedChrome: this.mergedChrome,
       navDrawerOpen: this.navDrawerOpen,
       gatewayStatus: this.gatewayStatus,
-      title:
-        (catalog ? this.history.catalogSession?.name?.trim() : undefined) ||
-        this.resolveHeaderSessionTitle(row),
+      title,
+      titlePending: !catalog && !title ? true : undefined,
       agent:
         !catalog && this.state?.settings?.sidebarAgentsMode === "roster"
           ? resolveChatAgentIdentity(this.state, this.context)
