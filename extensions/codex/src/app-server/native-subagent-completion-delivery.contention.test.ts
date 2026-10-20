@@ -15,6 +15,7 @@ import {
   nativeCompletionNotification,
   notifyChildStarted,
   registerParent,
+  turnStartedNotification,
 } from "./native-subagent-monitor.test-support.js";
 import { setupRunAttemptTestHooks } from "./run-attempt-test-harness.js";
 
@@ -56,10 +57,11 @@ describe("native completion durable receipts", () => {
       retirement = parent.unregister();
       await entered.promise;
       observer = await f.register(client);
-      await observer.ready;
-      observer.bindTurn("observer-turn");
+      // Host admission is complete; reconciliation still waits for the held consume.
+      await client.notify(turnStartedNotification("observer-turn", { threadId: "parent-thread" }));
       await client.notify(nativeCompletionNotification({ turnId: "observer-turn", result }));
       release.resolve();
+      await observer.ready;
       await retirement;
       await observer.unregister();
       expect(await f.store.readNativeSubagentAssignments?.(f.identity, f.historyOwner())).toEqual(

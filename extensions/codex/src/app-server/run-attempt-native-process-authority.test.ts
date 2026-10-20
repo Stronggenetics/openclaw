@@ -11,6 +11,7 @@ import { patchSessionEntry, upsertSessionEntry } from "openclaw/plugin-sdk/sessi
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { WebSocket } from "ws";
 import { readAttemptTerminal } from "./attempt-terminal.test-helper.js";
+import { resolveCodexAppServerHomeDir } from "./auth-start-options.js";
 import { consumeCodexAppServerLiveThread, hasCodexAppServerLiveThread } from "./client-runtime.js";
 import {
   createCodexTestHostCapabilities,
@@ -52,6 +53,7 @@ import {
   attachSqliteSessionTarget,
   readTranscriptMessagesByIdentity,
 } from "./sqlite-session.test-helpers.js";
+import { writeNativeCatalogFixture } from "./thread-lifecycle.test-fixtures.js";
 
 setupRunAttemptTestHooks();
 afterEach(() => clearRuntimeConfigSnapshot());
@@ -90,7 +92,10 @@ async function fixture(options: { failSettlement?: boolean } = {}) {
   vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
   const sessionFile = path.join(tempDir, "native-owner-session.jsonl");
   const workspaceDir = path.join(tempDir, "workspace");
+  const agentDir = path.join(tempDir, "agent");
+  const codexHome = resolveCodexAppServerHomeDir(agentDir);
   const threadId = "qualification-shared-thread";
+  const rolloutPath = path.join(codexHome, "sessions", `rollout-${threadId}.jsonl`);
   const sessionScope = {
     agentId: "main",
     sessionKey: "agent:main:session-1",
@@ -180,7 +185,11 @@ async function fixture(options: { failSettlement?: boolean } = {}) {
         if (method === "thread/resume") {
           expect(input.threadId).toBe(threadId);
         }
-        return threadStartResult(threadId, { cwd: "/workspace" });
+        if (method === "thread/start") {
+          await writeNativeCatalogFixture(rolloutPath, threadId, input.dynamicTools);
+        }
+        const response = threadStartResult(threadId, { cwd: "/workspace" });
+        return { ...response, thread: { ...response.thread, path: rolloutPath } };
       }
       if (method === "thread/read") {
         const requestedThreadId = typeof input.threadId === "string" ? input.threadId : threadId;
@@ -230,7 +239,7 @@ async function fixture(options: { failSettlement?: boolean } = {}) {
       }
       return undefined;
     },
-    { persistedThreads: [threadId] },
+    { persistedThreads: [threadId], codexHome },
   );
 
   const begin = async (
@@ -248,6 +257,7 @@ async function fixture(options: { failSettlement?: boolean } = {}) {
       runId: `${actor}-run-${attemptId}`,
       prompt: `${actor} qualification turn`,
     });
+    params.agentDir = agentDir;
     params.sessionTarget = { ...sessionScope, sessionId: params.sessionId };
     params.hostCapabilities = createSourceBoundHostCapabilities(source.signal);
     params.senderId = actor;
