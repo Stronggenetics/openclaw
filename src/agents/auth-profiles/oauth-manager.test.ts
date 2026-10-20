@@ -38,7 +38,7 @@ import {
   type NativeOAuthProviderFixture,
 } from "./oauth-native-provider.test-support.js";
 import { isSettledOAuthRefreshFailure, OAuthManagerRefreshError } from "./oauth-refresh-failure.js";
-import { isOAuthRefreshFence, isPendingOAuthRefreshFence } from "./oauth-refresh-marker.js";
+import { isPendingOAuthRefreshFence } from "./oauth-refresh-marker.js";
 import { loadPersistedAuthProfileStore } from "./persisted.js";
 import { withPersonalAuthProfileStore } from "./personal-store.js";
 import { removeAuthProfilesAcrossOwnerStores } from "./profiles.js";
@@ -133,6 +133,54 @@ afterEach(async () => {
 });
 
 describe("createOAuthManager", () => {
+  it("preserves the stored refresh credential after transient failures and recovers on next use", async () => {
+    await withOAuthAgentDirs("oauth-manager-transient-", async ({ mainAgentDir }) => {
+      const profileId = "xai:default";
+      const original = createCredential({
+        provider: "xai",
+        expires: Date.now() - 60_000,
+        accountId: "acct-transient",
+      });
+      const rotated = {
+        ...original,
+        access: "rotated-access",
+        refresh: "rotated-refresh",
+        expires: Date.now() + 600_000,
+      };
+      const failure = Object.assign(
+        new Error("xAI OAuth refresh failed (503): temporarily unavailable"),
+        { status: 503 },
+      );
+      const refreshCredential = vi
+        .fn()
+        .mockRejectedValueOnce(failure)
+        .mockResolvedValueOnce(rotated);
+      const manager = createTestManager({ refreshCredential });
+      saveCredential(profileId, original, mainAgentDir);
+      const resolve = () =>
+        manager.resolveOAuthAccess({
+          store: ensureAuthProfileStoreWithoutExternalProfiles(mainAgentDir),
+          profileId,
+          credential: original,
+          agentDir: mainAgentDir,
+        });
+      await expect(resolve()).rejects.toThrow("503");
+      const persisted = loadPersistedAuthProfileStore(mainAgentDir)!;
+      expect(persisted.profiles[profileId]).toEqual(original);
+      expect(persisted.usageStats?.[profileId]).toMatchObject({ cooldownReason: "timeout" });
+      expect(persisted.usageStats?.[profileId]?.cooldownUntil).toBeGreaterThan(Date.now());
+      expect(persisted.usageStats?.[profileId]?.cooldownUntil).toBeLessThanOrEqual(
+        Date.now() + 30_000,
+      );
+      await expect(resolve()).resolves.toMatchObject({ apiKey: rotated.access });
+      expect(refreshCredential).toHaveBeenCalledTimes(2);
+      expect(refreshCredential.mock.calls[1]?.[0]).toEqual(original);
+      expect(loadPersistedAuthProfileStore(mainAgentDir)?.profiles[profileId]).toMatchObject(
+        rotated,
+      );
+    });
+  });
+
   it("serializes personal refreshes without CLI bootstrap or shared copies", async () => {
     const provider = "xai";
     const metadata = {
@@ -684,28 +732,11 @@ describe("createOAuthManager", () => {
       } finally {
         recoveryRead.mockRestore();
       }
-      const fenced = ensureAuthProfileStoreWithoutExternalProfiles(agentDir, {
+      const restored = ensureAuthProfileStoreWithoutExternalProfiles(agentDir, {
         allowKeychainPrompt: false,
       }).profiles[profileId];
-      expect(fenced).toMatchObject({
-        type: "oauth",
-        provider: "openai",
-        expires: 1,
-        accountId: "acct-123",
-        email: "user@example.com",
-      });
-      if (fenced?.type !== "oauth") {
-        throw new Error("expected durable OAuth refresh fence");
-      }
-      expect(fenced.access).toMatch(
-        /^openclaw-oauth-refresh-fence:v1:[a-f0-9]{32}:failed:access:[a-f0-9]{64}$/,
-      );
-      expect(fenced.refresh).toMatch(
-        /^openclaw-oauth-refresh-fence:v1:[a-f0-9]{32}:failed:refresh:[a-f0-9]{64}$/,
-      );
-      expect(authority.readCurrentCredential()).toEqual(fenced);
-      expect(JSON.stringify(fenced)).not.toContain("managed-expired-access");
-      expect(JSON.stringify(fenced)).not.toContain("managed-refresh");
+      expect(restored).toEqual(managedCredential);
+      expect(authority.readCurrentCredential()).toEqual(managedCredential);
     });
   });
 
@@ -965,20 +996,8 @@ describe("Copilot tenant boundaries", () => {
           await expect(result).rejects.toThrow("OAuth token refresh failed");
         }
         expect(refresh).toHaveBeenCalledTimes(1);
-        const failed = read(agentDir);
-        expect(failed?.type).toBe("oauth");
-        if (failed?.type !== "oauth") {
-          throw new Error("expected durable failed OAuth refresh fence");
-        }
-        expect(isOAuthRefreshFence(failed)).toBe(true);
-        expect(isPendingOAuthRefreshFence(failed)).toBe(false);
-        expect(failed).toMatchObject({
-          provider: local.provider,
-          enterpriseUrl: local.enterpriseUrl,
-          accountId: local.accountId,
-        });
-        expect(failed.access).not.toContain(local.access);
-        expect(failed.refresh).not.toContain(local.refresh);
+        // A non-definitive failure retains the exact local credential, never another tenant's.
+        expect(read(agentDir)).toEqual(local);
         expect(read()).toEqual(renewed);
       });
     },

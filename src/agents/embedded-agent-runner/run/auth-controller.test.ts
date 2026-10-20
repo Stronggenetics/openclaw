@@ -394,11 +394,18 @@ it("exhausts the remaining auth profile after a non-cooling failure", async () =
 });
 
 it.each([
-  ["initial candidate", ["expired", "healthy"], ["healthy", "expired"], false],
-  ["rotated candidate", ["current", "expired", "healthy"], ["current", "healthy", "expired"], true],
-] satisfies [string, string[], string[], boolean][])(
+  ["initial candidate", ["expired", "healthy"], ["healthy", "expired"], false, false],
+  ["transient initial candidate", ["expired", "healthy"], ["healthy", "expired"], false, true],
+  [
+    "rotated candidate",
+    ["current", "expired", "healthy"],
+    ["current", "healthy", "expired"],
+    true,
+    false,
+  ],
+] satisfies [string, string[], string[], boolean, boolean][])(
   "records a failed OAuth refresh for the %s and prefers the healthy profile next",
-  async (_label, profileCandidates, expectedOrder, advanceAfterInitialization) => {
+  async (_label, profileCandidates, expectedOrder, advanceAfterInitialization, retryable) => {
     const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "openclaw-auth-controller-"));
     onTestFinished(() => fs.rm(agentDir, { recursive: true, force: true }));
     const authStore: AuthProfileStore = {
@@ -422,7 +429,10 @@ it.each([
         throw new OAuthRefreshFailureError({
           provider: "custom-openai",
           profileId,
-          message: "OAuth token refresh failed for custom-openai: invalid_grant",
+          message: retryable
+            ? "OAuth token refresh failed for custom-openai: 503 unavailable"
+            : "OAuth token refresh failed for custom-openai: invalid_grant",
+          retryable,
         });
       }
       return profileAuth(profileId);
@@ -443,11 +453,23 @@ it.each([
 
     expect(harness.lastProfileId).toBe("healthy");
     const persistedStore = ensureAuthProfileStore(agentDir, { syncExternalCli: false });
-    expect(persistedStore.usageStats?.expired).toMatchObject({
-      disabledReason: "auth_permanent",
-      failureCounts: { auth_permanent: 1 },
-    });
-    expect(persistedStore.usageStats?.expired?.disabledUntil).toBeGreaterThan(Date.now());
+    if (retryable) {
+      expect(persistedStore.usageStats?.expired).toMatchObject({
+        cooldownReason: "timeout",
+        failureCounts: { timeout: 1 },
+      });
+      expect(persistedStore.usageStats?.expired?.disabledUntil).toBeUndefined();
+      expect(persistedStore.usageStats?.expired?.cooldownUntil).toBeGreaterThan(Date.now());
+      expect(persistedStore.usageStats?.expired?.cooldownUntil).toBeLessThanOrEqual(
+        Date.now() + 30_000,
+      );
+    } else {
+      expect(persistedStore.usageStats?.expired).toMatchObject({
+        disabledReason: "auth_permanent",
+        failureCounts: { auth_permanent: 1 },
+      });
+      expect(persistedStore.usageStats?.expired?.disabledUntil).toBeGreaterThan(Date.now());
+    }
     expect(
       resolveAuthProfileOrder({
         store: persistedStore,
@@ -456,7 +478,9 @@ it.each([
       }),
     ).toEqual(expectedOrder);
     expect(warn).toHaveBeenCalledWith(
-      'auth profile "expired" failed for provider "custom-openai": OAuth token refresh failed for custom-openai: invalid_grant',
+      retryable
+        ? 'auth profile "expired" failed for provider "custom-openai": OAuth token refresh failed for custom-openai: 503 unavailable'
+        : 'auth profile "expired" failed for provider "custom-openai": OAuth token refresh failed for custom-openai: invalid_grant',
     );
   },
 );

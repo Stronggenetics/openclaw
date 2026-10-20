@@ -74,7 +74,7 @@ describe("OAuth refresh failure ownership", () => {
     await removeOAuthTestTempRoot(tempRoot);
   });
 
-  it("fences the failed generation instead of retrying it", async () => {
+  it("fences a definitively rejected generation instead of retrying it", async () => {
     const profileId = "openai:default";
     const provider = "openai";
     saveAuthProfileStore(createExpiredOauthStore({ profileId, provider }), agentDir);
@@ -83,7 +83,7 @@ describe("OAuth refresh failure ownership", () => {
     refreshProviderOAuthCredentialWithPluginMock.mockImplementation(async () => {
       callCount += 1;
       if (callCount === 1) {
-        throw new Error("simulated upstream failure");
+        throw new Error("invalid_grant");
       }
       // A failed owner leaves its generation fenced. No peer may replay it.
       return {

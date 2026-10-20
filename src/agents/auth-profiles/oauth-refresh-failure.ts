@@ -1,4 +1,5 @@
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
+import { collectNestedErrorCandidates } from "@openclaw/normalization-core/error-coercion";
 import {
   asOptionalObjectRecord,
   asOptionalRecord,
@@ -9,6 +10,7 @@ import { sanitizeForLog } from "../../../packages/terminal-core/src/ansi.js";
 import { formatCliCommand } from "../../cli/command-format.js";
 import { toErrorObject } from "../../infra/errors.js";
 import { redactSensitiveText } from "../../logging/redact.js";
+import { extractErrorHttpStatus } from "../../shared/assistant-error-format.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
 import { formatInlineCodeSpan } from "../../shared/markdown-code.js";
 import { formatProviderLoginCommand } from "../../shared/provider-login-command.js";
@@ -176,6 +178,35 @@ function readProviderOAuthRefreshFailure(error: unknown): OAuthRefreshFailurePre
   };
 }
 
+/** Only an explicit credential rejection retires an externally attempted refresh generation. */
+export function isTransientOAuthRefreshFailure(error: unknown): boolean {
+  for (const candidate of collectNestedErrorCandidates(error)) {
+    const record = asOptionalRecord(candidate);
+    const presentation = readProviderOAuthRefreshFailure(candidate);
+    const message =
+      readStringField(record, "message") ?? (typeof candidate === "string" ? candidate : "");
+    const reason =
+      presentation?.reason ??
+      classifyOAuthRefreshFailureReason(
+        [message, record?.reason, record?.code, record?.error]
+          .filter((value) => typeof value === "string")
+          .join(" "),
+      );
+    const status = Number(
+      presentation?.status ??
+        record?.status ??
+        record?.statusCode ??
+        extractErrorHttpStatus(message)?.code ??
+        /\b(?:failed|error)\s*\(([45]\d{2})\)/i.exec(message)?.[1],
+    );
+    if (reason || status === 400 || status === 401) {
+      return false;
+    }
+  }
+  // Transport errors and unclassified upstream failures do not prove revocation.
+  return true;
+}
+
 /** Error type that carries provider and classified OAuth refresh failure reason. */
 export class OAuthRefreshFailureError extends Error {
   readonly errorType?: string;
@@ -184,6 +215,7 @@ export class OAuthRefreshFailureError extends Error {
   readonly reason: OAuthRefreshFailureReason | null;
   readonly status?: number;
   readonly summary?: string;
+  readonly retryable?: boolean;
 
   constructor(params: {
     provider: string;
@@ -194,6 +226,7 @@ export class OAuthRefreshFailureError extends Error {
     reason?: OAuthRefreshFailureReason | null;
     status?: number;
     summary?: string;
+    retryable?: boolean;
   }) {
     super(params.message, { cause: params.cause });
     const inherited =
@@ -201,6 +234,9 @@ export class OAuthRefreshFailureError extends Error {
         ? params.cause
         : readProviderOAuthRefreshFailure(params.cause);
     this.name = "OAuthRefreshFailureError";
+    this.retryable =
+      params.retryable ??
+      (params.cause instanceof OAuthRefreshFailureError ? params.cause.retryable : undefined);
     this.errorType = normalizeBoundedOptionalString(
       params.errorType ?? inherited?.errorType,
       OAUTH_REFRESH_FAILURE_ERROR_TYPE_MAX_CHARS,
@@ -239,6 +275,7 @@ export class OAuthManagerRefreshError extends OAuthRefreshFailureError {
     attemptedCredentials?: OAuthCredential[];
     profileId: string;
     refreshedStore: AuthProfileStore;
+    retryable?: boolean;
     cause: unknown;
   }) {
     const initiatingCause = readOAuthRefreshInitiatingError(params.cause);
@@ -260,6 +297,11 @@ export class OAuthManagerRefreshError extends OAuthRefreshFailureError {
       profileId: params.profileId,
       message: `OAuth token refresh failed for ${params.credential.provider}: ${causeMessage}`,
       cause: createRedactedOAuthRefreshCause(params.cause, secrets),
+      retryable:
+        params.retryable ??
+        (initiatingCause instanceof OAuthRefreshFailureError
+          ? initiatingCause.retryable
+          : undefined),
       errorType: presentation?.errorType,
       reason: presentation?.reason,
       status: presentation?.status,

@@ -1,7 +1,10 @@
+import type { OpenClawConfig } from "../../config/types.openclaw.js";
 import { continueAuthProfileAuthorization } from "./authorization-lifetime.js";
+import { buildOAuthApiKey } from "./oauth-provider-operations.js";
 import { isExactOAuthCredential } from "./oauth-refresh-fence.js";
 import { createFailedOAuthRefreshFence } from "./oauth-refresh-marker.js";
 import type { beginOAuthRefreshObservation } from "./oauth-refresh-observation.js";
+import { rollbackOAuthRefreshPeerClaims } from "./oauth-refresh-peers.js";
 import type { OAuthRefreshPeerClaim } from "./oauth-refresh-peers.js";
 import { hasMatchingOAuthIdentity, isSafeOAuthPostClaimSettlement } from "./oauth-shared.js";
 import type { PersonalAuthProfileStore } from "./personal-store.js";
@@ -10,6 +13,7 @@ import {
   updateAuthProfileStoreWithLock,
 } from "./store-runtime.js";
 import type { AuthProfileStore, OAuthCredential } from "./types.js";
+import { computeNextProfileUsageStats } from "./usage-failure-state.js";
 
 export type ResolvedOAuthAccess = {
   apiKey: string;
@@ -29,6 +33,7 @@ export type OAuthRefreshClaim =
       personalStore?: PersonalAuthProfileStore;
       profileId: string;
       credential: OAuthCredential;
+      storedCredential: OAuthCredential;
       fence: OAuthCredential;
       ownerAgentDir?: string;
       authPath: string;
@@ -184,6 +189,7 @@ export async function rollbackOAuthRefreshOwnerClaim(params: {
   profileId: string;
   fence: OAuthCredential;
   original: OAuthCredential;
+  transientFailure?: boolean;
 }): Promise<void> {
   let restored = false;
   const updated = await updateOAuthStore({
@@ -198,6 +204,14 @@ export async function rollbackOAuthRefreshOwnerClaim(params: {
       store.profiles[params.profileId] = continueAuthProfileAuthorization(params.fence, {
         ...params.original,
       });
+      if (params.transientFailure) {
+        store.usageStats ??= {};
+        store.usageStats[params.profileId] = computeNextProfileUsageStats({
+          existing: store.usageStats[params.profileId] ?? {},
+          now: Date.now(),
+          reason: "timeout",
+        });
+      }
       restored = true;
       return true;
     },
@@ -211,4 +225,56 @@ export async function rollbackOAuthRefreshOwnerClaim(params: {
     profileId: params.profileId,
     fence: params.fence,
   });
+}
+
+export async function buildValidatedOAuthAccess(
+  credential: OAuthCredential,
+  context: {
+    cfg?: OpenClawConfig;
+    agentDir?: string;
+    validateCredential?: (credential: OAuthCredential) => void;
+    personalStore?: PersonalAuthProfileStore;
+  },
+): Promise<ResolvedOAuthAccess> {
+  context.validateCredential?.(credential);
+  const apiKey = await buildOAuthApiKey(
+    context.personalStore ? structuredClone(credential) : credential,
+    context.cfg,
+  );
+  const accepted = context.personalStore
+    ? await context.personalStore.accept(credential, (current) =>
+        context.validateCredential?.(current),
+      )
+    : credential;
+  return { apiKey, credential: accepted };
+}
+
+/** Restore completed transient work; observer timeouts never enter this rollback. */
+export async function rollbackTransientOAuthRefreshClaim(
+  claim: Extract<OAuthRefreshClaim, { kind: "claimed" }>,
+  claims: readonly OAuthRefreshPeerClaim[],
+): Promise<unknown[]> {
+  const errors: unknown[] = [];
+  try {
+    await rollbackOAuthRefreshPeerClaims({
+      profileId: claim.profileId,
+      fence: claim.fence,
+      claims,
+    });
+  } catch (error) {
+    errors.push(error);
+  }
+  try {
+    await rollbackOAuthRefreshOwnerClaim({
+      personalStore: claim.personalStore,
+      ownerAgentDir: claim.ownerAgentDir,
+      profileId: claim.profileId,
+      fence: claim.fence,
+      original: claim.storedCredential,
+      transientFailure: true,
+    });
+  } catch (error) {
+    errors.push(error);
+  }
+  return errors;
 }

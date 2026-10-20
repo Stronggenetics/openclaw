@@ -21,15 +21,12 @@ import {
 } from "./external-cli-sync.js";
 import { shouldMirrorRefreshedOAuthCredential } from "./oauth-identity.js";
 import { withOAuthProfileLock } from "./oauth-profile-lock.js";
-import {
-  buildOAuthApiKey,
-  canRefreshOAuthCredential,
-  refreshOAuthCredential,
-} from "./oauth-provider-operations.js";
+import { canRefreshOAuthCredential, refreshOAuthCredential } from "./oauth-provider-operations.js";
 import {
   OAuthManagerRefreshError,
   OAuthRefreshFailureError,
   appendOAuthRefreshCleanupErrors,
+  isTransientOAuthRefreshFailure,
   markOAuthRefreshFailureSettled,
 } from "./oauth-refresh-failure.js";
 import {
@@ -64,11 +61,13 @@ import {
   isSafeToAdoptMainStoreOAuthIdentity,
 } from "./oauth-shared.js";
 import {
+  buildValidatedOAuthAccess,
   canReuseOAuthCredentialAfterRefreshFailure,
   loadStoredOAuthRefreshStore,
   markOAuthRefreshClaimFailed,
   persistOAuthRefreshClaim,
   rollbackOAuthRefreshOwnerClaim,
+  rollbackTransientOAuthRefreshClaim,
   settleOAuthRefreshClaim,
   type OAuthRefreshClaim,
   type ResolvedOAuthAccess,
@@ -104,28 +103,6 @@ type OAuthRefreshParams = {
 
 /** Create an independent OAuth refresh queue using the native provider operations. */
 export function createOAuthManager() {
-  async function buildValidatedAccess(
-    credential: OAuthCredential,
-    context: {
-      cfg?: OpenClawConfig;
-      agentDir?: string;
-      validateCredential?: (credential: OAuthCredential) => void;
-      personalStore?: PersonalAuthProfileStore;
-    },
-  ): Promise<ResolvedOAuthAccess> {
-    context.validateCredential?.(credential);
-    const apiKey = await buildOAuthApiKey(
-      context.personalStore ? structuredClone(credential) : credential,
-      context.cfg,
-    );
-    const accepted = context.personalStore
-      ? await context.personalStore.accept(credential, (current) =>
-          context.validateCredential?.(current),
-        )
-      : credential;
-    return { apiKey, credential: accepted };
-  }
-
   async function adoptNewerMainOAuthCredential(params: {
     profileId: string;
     agentDir?: string;
@@ -560,6 +537,7 @@ export function createOAuthManager() {
             personalStore: params.personalStore,
             profileId: params.profileId,
             credential: credentialToRefresh,
+            storedCredential: cred,
             fence,
             ownerAgentDir,
             authPath,
@@ -619,13 +597,13 @@ export function createOAuthManager() {
           ) {
             return null;
           }
-          return await buildValidatedAccess(credential, params);
+          return await buildValidatedOAuthAccess(credential, params);
         },
       });
       return observed;
     }
     if (claim.kind === "use") {
-      return await buildValidatedAccess(claim.credential, params);
+      return await buildValidatedOAuthAccess(claim.credential, params);
     }
 
     params.attemptedCredentials?.push(claim.credential);
@@ -671,7 +649,10 @@ export function createOAuthManager() {
       cleanupErrors: unknown[];
     };
 
-    const failClaim = async (rediscoverPeers: boolean): Promise<FailureSettlement> => {
+    const failClaim = async (
+      rediscoverPeers: boolean,
+      retryable: boolean,
+    ): Promise<FailureSettlement> => {
       let result: FailureSettlement = {
         supersedingOwner: null,
         validationError: null,
@@ -733,6 +714,13 @@ export function createOAuthManager() {
                 }
               }
             }
+            if (retryable && !validationError) {
+              cleanupErrors.push(
+                ...(await rollbackTransientOAuthRefreshClaim(claim, activePeerClaims)),
+              );
+              result = { supersedingOwner: null, validationError, cleanupErrors };
+              return;
+            }
             await failPeers((error) => cleanupErrors.push(error));
             try {
               await markOAuthRefreshClaimFailed({
@@ -765,15 +753,18 @@ export function createOAuthManager() {
       const initiatingError = failure
         ? toErrorObject(failure.error, "OAuth refresh failed")
         : undefined;
+      const retryable =
+        failure?.externalRefresh === true && isTransientOAuthRefreshFailure(failure.error);
       const { supersedingOwner, validationError, cleanupErrors } = await failClaim(
         failure?.rediscoverPeers !== false,
+        retryable,
       );
       if (validationError) {
         throw new OAuthSettlementCredentialValidationError(validationError, cleanupErrors);
       }
       if (supersedingOwner) {
         try {
-          return await buildValidatedAccess(supersedingOwner, params);
+          return await buildValidatedOAuthAccess(supersedingOwner, params);
         } catch (error) {
           const combinedFailure =
             initiatingError !== undefined
@@ -791,6 +782,7 @@ export function createOAuthManager() {
             profileId: params.profileId,
             message: error.message,
             cause: error,
+            retryable,
           });
           markOAuthRefreshFailureSettled(settled, error);
           throw settled;
@@ -900,7 +892,7 @@ export function createOAuthManager() {
             [params.profileId]: settled.credential,
           });
         }
-        return await buildValidatedAccess(settled.credential, params);
+        return await buildValidatedOAuthAccess(settled.credential, params);
       } catch (error) {
         if (error instanceof OAuthRefreshPeerFenceError && hasSqliteWorkerOutcomeUnknown(error)) {
           // The owner commit has not started. Settle exact captured fences without
@@ -1005,7 +997,7 @@ export function createOAuthManager() {
       !isOAuthRefreshFence(adoptedCredential) &&
       hasUsableOAuthCredential(effectiveCredential)
     ) {
-      return await buildValidatedAccess(effectiveCredential, params);
+      return await buildValidatedOAuthAccess(effectiveCredential, params);
     }
 
     try {
@@ -1041,7 +1033,7 @@ export function createOAuthManager() {
         candidate: OAuthCredential,
       ): Promise<ResolvedOAuthAccess | null> => {
         try {
-          return await buildValidatedAccess(candidate, params);
+          return await buildValidatedOAuthAccess(candidate, params);
         } catch (cleanupError) {
           refreshError = appendOAuthRefreshCleanupErrors(refreshError, [cleanupError]);
           recoveryBuildFailed = true;
@@ -1104,6 +1096,11 @@ export function createOAuthManager() {
         attemptedCredentials: [effectiveCredential, ...attemptedCredentials],
         profileId: params.profileId,
         refreshedStore,
+        retryable:
+          isTransientOAuthRefreshFailure(refreshError) &&
+          (refreshed?.type !== "oauth" ||
+            !isOAuthRefreshFence(refreshed) ||
+            isPendingOAuthRefreshFence(refreshed)),
         cause: refreshError,
       });
     }

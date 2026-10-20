@@ -211,6 +211,11 @@ During OAuth refresh, the current credential generation is replaced by an inert
 durable marker. Pending markers remain ineligible by default and are ordered only
 by runtime paths that immediately pass them to the settlement-aware resolver.
 Failed markers are terminal and require the operator to authenticate again.
+Native profile refreshes restore their exact claimed credential after a completed
+transient failure and use the normal bounded transient cooldown (initially 30
+seconds, at most five minutes). Only an explicit token rejection, such as
+`invalid_grant`, revocation, or a token-endpoint 400/401, retires the refresh
+credential. A caller timeout does not roll back or retry an in-flight owner.
 
 Agent-local peers never receive copied rotated refresh material. A peer removes
 its marker and inherits the shared credential only after verifying that the
@@ -223,8 +228,12 @@ request-owned native writer as the refreshing credential. Each peer update
 retains its captured database file identity and compares the credential inside
 the write transaction; empty agent stores do not block a shared-store refresh.
 If peer fencing fails before the provider refresh starts, claimed credentials
-are restored. Once the provider request starts, failed refreshes remain terminal
-because the provider may already have consumed the old refresh token.
+are restored. After a native profile refresh finishes with a transient failure, exact owner
+and peer claims are restored without replacing a newer login. A lost response
+may already have consumed a rotating refresh token: recovery is best effort,
+and a subsequent definitive rejection still requires authentication. Invalid
+returned credentials and post-success settlement failures remain fail-closed.
+External-tool serialized credential stores retain their separate terminal policy.
 
 ## Plugin SDK OAuth validation
 
