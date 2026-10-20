@@ -10,7 +10,7 @@ import "./oauth-external-auth-passthrough.test-support.js";
 import "./oauth-file-lock-passthrough.test-support.js";
 import { createOAuthManager } from "./oauth-manager.js";
 import { mockOAuthProviderOperations } from "./oauth-native-provider.test-support.js";
-import { isPendingOAuthRefreshFence } from "./oauth-refresh-marker.js";
+import { isOAuthRefreshFence, isPendingOAuthRefreshFence } from "./oauth-refresh-marker.js";
 import {
   OAUTH_AGENT_ENV_KEYS,
   createOAuthMainAgentDir,
@@ -21,6 +21,7 @@ import {
   resetOAuthProviderRuntimeMocks,
 } from "./oauth-test-utils.js";
 import { resolveApiKeyForProfile } from "./oauth.js";
+import { loadPersistedAuthProfileStore } from "./persisted.js";
 import { clearRuntimeAuthProfileStoreSnapshots } from "./runtime-snapshots.js";
 import {
   ensureAuthProfileStore,
@@ -74,7 +75,40 @@ describe("OAuth refresh failure ownership", () => {
     await removeOAuthTestTempRoot(tempRoot);
   });
 
-  it("fences a definitively rejected generation instead of retrying it", async () => {
+  it.each(["xAI OAuth token response is missing access_token", "unclassified upstream failure"])(
+    "keeps provider validation and unknown failures terminal: %s",
+    async (message) => {
+      const profileId = "xai:terminal";
+      const original: OAuthCredential = {
+        type: "oauth",
+        provider: "xai",
+        access: "synthetic-terminal-access",
+        refresh: "synthetic-terminal-refresh",
+        expires: Date.now() - 60_000,
+      };
+      const refreshCredential = vi.fn().mockRejectedValue(new Error(message));
+      mockOAuthProviderOperations({ refreshCredential });
+      const manager = createOAuthManager();
+      saveAuthProfileStore({ version: 1, profiles: { [profileId]: original } }, agentDir);
+      const resolve = () =>
+        manager.resolveOAuthAccess({
+          store: ensureAuthProfileStoreWithoutExternalProfiles(agentDir),
+          profileId,
+          credential: original,
+          agentDir,
+        });
+      await expect(resolve()).rejects.toThrow(message);
+      const persisted = loadPersistedAuthProfileStore(agentDir)?.profiles[profileId];
+      expect(isOAuthRefreshFence(persisted?.type === "oauth" ? persisted : undefined)).toBe(true);
+      expect(isPendingOAuthRefreshFence(persisted?.type === "oauth" ? persisted : undefined)).toBe(
+        false,
+      );
+      await expect(resolve()).resolves.toBeNull();
+      expect(refreshCredential).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it("fences the failed generation instead of retrying it", async () => {
     const profileId = "openai:default";
     const provider = "openai";
     saveAuthProfileStore(createExpiredOauthStore({ profileId, provider }), agentDir);
@@ -83,7 +117,7 @@ describe("OAuth refresh failure ownership", () => {
     refreshProviderOAuthCredentialWithPluginMock.mockImplementation(async () => {
       callCount += 1;
       if (callCount === 1) {
-        throw new Error("invalid_grant");
+        throw new Error("simulated upstream failure");
       }
       // A failed owner leaves its generation fenced. No peer may replay it.
       return {

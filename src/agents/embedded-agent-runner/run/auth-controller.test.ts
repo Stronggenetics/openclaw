@@ -1,3 +1,4 @@
+import "../../auth-profiles/external-auth.test-support.js";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -11,9 +12,15 @@ import {
   mintSecretSentinel,
   resolveSecretSentinel,
 } from "../../../secrets/sentinel.js";
+import { closeOpenClawStateDatabaseForTest } from "../../../state/openclaw-state-db.js";
+import { withEnvAsync } from "../../../test-utils/env.js";
+import { cleanupSessionStateForTest } from "../../../test-utils/session-state-cleanup.js";
 import type { AuthProfileStore } from "../../auth-profiles.js";
+import { createOAuthManager } from "../../auth-profiles/oauth-manager.js";
+import { mockOAuthProviderOperations } from "../../auth-profiles/oauth-native-provider.test-support.js";
 import { OAuthRefreshFailureError } from "../../auth-profiles/oauth-refresh-failure.js";
 import { resolveAuthProfileOrder } from "../../auth-profiles/order.js";
+import { loadPersistedAuthProfileStore } from "../../auth-profiles/persisted.js";
 import { ensureAuthProfileStore, saveAuthProfileStore } from "../../auth-profiles/store-runtime.js";
 import { FailoverError } from "../../failover-error.js";
 import { makeProviderModelFixture } from "../../test-helpers/provider-model-fixture.js";
@@ -828,3 +835,68 @@ it.each([false, true])(
     }
   },
 );
+
+it.each([
+  { authProfileStateMode: "read-only" as const },
+  { authProfileFailurePolicy: "local" as const },
+  { authProfileStateMode: "read-write" as const },
+])("keeps refresh health writes at the caller policy boundary: %j", async (policy) => {
+  const stateDir = await fs.mkdtemp(path.join(os.tmpdir(), "oauth-policy-"));
+  const agentDir = path.join(stateDir, "agents/main/agent");
+  await fs.mkdir(agentDir, { recursive: true });
+  await withEnvAsync({ OPENCLAW_STATE_DIR: stateDir, OPENCLAW_AGENT_DIR: agentDir }, async () => {
+    const profileId = "expired";
+    const credential = {
+      type: "oauth" as const,
+      provider: "custom-openai",
+      access: "synthetic-access",
+      refresh: "synthetic-refresh",
+      expires: Date.now() - 60_000,
+    };
+    const authStore: AuthProfileStore = { version: 1, profiles: { [profileId]: credential } };
+    saveAuthProfileStore(authStore, agentDir, { filterExternalAuthProfiles: false });
+    mockOAuthProviderOperations({
+      refreshCredential: async () => {
+        throw Object.assign(new Error("token endpoint unavailable"), {
+          oauthRefreshFailure: { status: 503, retryable: true },
+        });
+      },
+    });
+    const manager = createOAuthManager();
+    mocks.getApiKeyForModelCore.mockImplementation(async () =>
+      manager.resolveOAuthAccess({ store: authStore, profileId, credential, agentDir }),
+    );
+    const controller = createEmbeddedRunAuthController({
+      config: undefined,
+      agentDir,
+      workspaceDir: stateDir,
+      authStore,
+      authStorage: { setRuntimeApiKey },
+      profileCandidates: [profileId],
+      initialThinkLevel: "medium",
+      attemptedThinking: new Set(),
+      fallbackConfigured: true,
+      allowTransientCooldownProbe: false,
+      provider: credential.provider,
+      modelId: "test-model",
+      state: harness,
+      ...policy,
+      log: { debug() {}, info() {}, warn() {} },
+    });
+    try {
+      await expect(controller.initializeAuthProfile()).rejects.toThrow();
+      const persisted = loadPersistedAuthProfileStore(agentDir)!;
+      expect(persisted.profiles[profileId]).toEqual(credential);
+      if (policy.authProfileStateMode === "read-write") {
+        expect(persisted.usageStats?.[profileId]?.failureCounts).toEqual({ timeout: 1 });
+      } else {
+        expect(persisted.usageStats?.[profileId]).toBeUndefined();
+      }
+    } finally {
+      vi.restoreAllMocks();
+      await cleanupSessionStateForTest({ stateDir });
+      closeOpenClawStateDatabaseForTest();
+    }
+  });
+  await fs.rm(stateDir, { recursive: true, force: true });
+});

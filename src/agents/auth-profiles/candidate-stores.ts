@@ -197,6 +197,7 @@ export async function prepareCandidateAuthProfileCredentialRead(
 }
 
 type CandidateAuthProfileUpdate = {
+  assertCurrent?: () => void;
   candidate: CandidateAuthProfileStore;
   preserveProfileState?: boolean;
   profileId: string;
@@ -244,6 +245,7 @@ async function runCandidateAuthProfileUpdate(
     const assertCurrent = () => {
       workerWrites.assertOwner(candidate.env);
       assertCandidateDatabaseIdentity(candidate);
+      params.assertCurrent?.();
     };
     return runAuthProfileUsage(() =>
       workerWrites.run(() => {
@@ -323,6 +325,7 @@ async function runCandidateAuthProfileUpdate(
     options: { env: candidate.env },
     assertCurrent: () => {
       assertCandidateDatabaseIdentity(candidate);
+      params.assertCurrent?.();
     },
     update(prepared) {
       const store = prepared.store;

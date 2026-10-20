@@ -1,4 +1,9 @@
-import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
+import {
+  collectErrorGraphCandidates,
+  extractErrorCode,
+  formatErrorMessage,
+  readErrorName,
+} from "openclaw/plugin-sdk/error-runtime";
 import { matchesNoProxy, resolveEnvHttpProxyAgentOptions } from "openclaw/plugin-sdk/fetch-runtime";
 import {
   positiveSecondsToSafeMilliseconds,
@@ -47,6 +52,7 @@ type XaiOAuthTokenResponse = ReturnType<typeof parseXaiOAuthTokenResponse>;
 type XaiOAuthFetchOptions = {
   signal?: AbortSignal;
   assertCurrent?: () => void;
+  onResponse?: (status: number) => void;
 };
 
 type XaiOAuthResponseBody = Awaited<ReturnType<typeof readResponseBody>>;
@@ -57,6 +63,7 @@ function fetchXaiOAuth(url: string, options: XaiOAuthFetchOptions, body?: Record
   return fetchWithSsrFGuard({
     url,
     beforeRequest: options.assertCurrent,
+    onResponse: options.onResponse,
     mode: "trusted_explicit_proxy",
     resolveDispatcherPolicy: (target) => {
       // Operator-owned proxies may be local; NO_PROXY must be reevaluated for every hop.
@@ -181,10 +188,15 @@ async function requestXaiOAuthRefresh(
   for (let attempt = 1; ; attempt += 1) {
     let response: Response;
     let body: XaiOAuthResponseBody;
+    let responseReceived = false;
     try {
       const result = await fetchXaiOAuth(
         endpoint,
-        {},
+        {
+          onResponse: () => {
+            responseReceived = true;
+          },
+        },
         {
           grant_type: "refresh_token",
           client_id: XAI_OAUTH_CLIENT_ID,
@@ -196,9 +208,29 @@ async function requestXaiOAuthRefresh(
       // UTF-8 rather than persisting replacement characters as token bytes.
       body = await readResponseBody(result, { fatalUtf8: response.ok });
     } catch (err) {
-      // A lost or unreadable response may already have consumed the refresh token.
-      // Only a Cloudflare challenge response is safe to retry below.
-      throw new Error(`${context} failed: ${formatErrorMessage(err)}`, { cause: err });
+      const error = new Error(`${context} failed: ${formatErrorMessage(err)}`, { cause: err });
+      // Never replay a successful or unreadable response. Only identified pre-response
+      // transport failures opt into manager recovery after this request has settled.
+      if (
+        !responseReceived &&
+        collectErrorGraphCandidates(err, (current) => [current.cause]).some(
+          (candidate) =>
+            readErrorName(candidate) === "TimeoutError" ||
+            [
+              "ECONNRESET",
+              "ETIMEDOUT",
+              "ECONNREFUSED",
+              "ENOTFOUND",
+              "EAI_AGAIN",
+              "UND_ERR_CONNECT_TIMEOUT",
+              "UND_ERR_HEADERS_TIMEOUT",
+              "UND_ERR_SOCKET",
+            ].includes(extractErrorCode(candidate) ?? ""),
+        )
+      ) {
+        Object.assign(error, { oauthRefreshFailure: { retryable: true } });
+      }
+      throw error;
     }
     if (response.ok) {
       return parseXaiOAuthTokenResponse(body.json);
@@ -224,7 +256,9 @@ async function requestXaiOAuthRefresh(
         "or re-run xAI OAuth login."
       : formatXaiOAuthError({ context, status, body: body.json });
     if (attempt >= XAI_OAUTH_REFRESH_MAX_ATTEMPTS || !isCloudflareChallenge) {
-      throw new Error(message);
+      throw Object.assign(new Error(message), {
+        oauthRefreshFailure: { status, retryable: status === 429 || status >= 500 },
+      });
     }
     await sleep(XAI_OAUTH_REFRESH_RETRY_DELAY_MS);
   }

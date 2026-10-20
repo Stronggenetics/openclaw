@@ -62,6 +62,8 @@ import {
 } from "./oauth-shared.js";
 import {
   buildValidatedOAuthAccess,
+  OAuthSettlementCredentialValidationError,
+  validateSettlementCredential,
   canReuseOAuthCredentialAfterRefreshFailure,
   loadStoredOAuthRefreshStore,
   markOAuthRefreshClaimFailed,
@@ -70,6 +72,7 @@ import {
   rollbackTransientOAuthRefreshClaim,
   settleOAuthRefreshClaim,
   type OAuthRefreshClaim,
+  type OAuthRefreshFailureSettlement,
   type ResolvedOAuthAccess,
 } from "./oauth-store.js";
 import { resolveSharedAuthStorePath } from "./path-resolve.js";
@@ -140,25 +143,6 @@ export function createOAuthManager() {
   }
 
   let refreshQueue = new KeyedAsyncQueue();
-
-  class OAuthSettlementCredentialValidationError extends Error {
-    constructor(cause: unknown, cleanupErrors: readonly unknown[] = []) {
-      const error = toErrorObject(cause, "OAuth credential validation failed");
-      super(error.message, { cause: appendOAuthRefreshCleanupErrors(error, cleanupErrors) });
-      this.name = "OAuthSettlementCredentialValidationError";
-    }
-  }
-
-  function validateSettlementCredential(
-    validateCredential: ((credential: OAuthCredential) => void) | undefined,
-    credential: OAuthCredential,
-  ): void {
-    try {
-      validateCredential?.(credential);
-    } catch (error) {
-      throw new OAuthSettlementCredentialValidationError(error);
-    }
-  }
 
   async function resolveAuthoritativeSharedOAuthCredentialUnderLock(params: {
     profileId: string;
@@ -606,6 +590,7 @@ export function createOAuthManager() {
       return await buildValidatedOAuthAccess(claim.credential, params);
     }
 
+    const assertPersonalRefreshCurrent = params.personalStore?.captureRefreshAuthority();
     params.attemptedCredentials?.push(claim.credential);
     const peerConfig = params.cfg ?? {};
     let activePeerClaims = claim.peerClaims;
@@ -643,17 +628,16 @@ export function createOAuthManager() {
       }
     };
 
-    type FailureSettlement = {
-      supersedingOwner: OAuthCredential | null;
-      validationError: OAuthSettlementCredentialValidationError | null;
-      cleanupErrors: unknown[];
-    };
-
+    const assertCurrent = () =>
+      validateSettlementCredential(() => {
+        assertPersonalRefreshCurrent?.();
+        params.validateCredential?.(claim.credential);
+      }, claim.credential);
     const failClaim = async (
       rediscoverPeers: boolean,
       retryable: boolean,
-    ): Promise<FailureSettlement> => {
-      let result: FailureSettlement = {
+    ): Promise<OAuthRefreshFailureSettlement> => {
+      let result: OAuthRefreshFailureSettlement = {
         supersedingOwner: null,
         validationError: null,
         cleanupErrors: [],
@@ -675,6 +659,9 @@ export function createOAuthManager() {
                     )
                   ).profiles[params.profileId]
                 : undefined;
+              if (retryable) {
+                assertCurrent();
+              }
               supersedingOwner =
                 owner?.type === "oauth" &&
                 !isExactOAuthCredential(owner, claim.fence) &&
@@ -715,11 +702,23 @@ export function createOAuthManager() {
               }
             }
             if (retryable && !validationError) {
-              cleanupErrors.push(
-                ...(await rollbackTransientOAuthRefreshClaim(claim, activePeerClaims)),
-              );
-              result = { supersedingOwner: null, validationError, cleanupErrors };
-              return;
+              try {
+                cleanupErrors.push(
+                  ...(await rollbackTransientOAuthRefreshClaim(
+                    claim,
+                    activePeerClaims,
+                    assertCurrent,
+                  )),
+                );
+                result = { supersedingOwner: null, validationError, cleanupErrors };
+                return;
+              } catch (error) {
+                if (error instanceof OAuthSettlementCredentialValidationError) {
+                  validationError = error;
+                } else {
+                  cleanupErrors.push(error);
+                }
+              }
             }
             await failPeers((error) => cleanupErrors.push(error));
             try {
@@ -1097,10 +1096,10 @@ export function createOAuthManager() {
         profileId: params.profileId,
         refreshedStore,
         retryable:
-          isTransientOAuthRefreshFailure(refreshError) &&
-          (refreshed?.type !== "oauth" ||
-            !isOAuthRefreshFence(refreshed) ||
-            isPendingOAuthRefreshFence(refreshed)),
+          (refreshed?.type === "oauth" && isPendingOAuthRefreshFence(refreshed)) ||
+          (isTransientOAuthRefreshFailure(refreshError) &&
+            refreshed?.type === "oauth" &&
+            !isOAuthRefreshFence(refreshed)),
         cause: refreshError,
       });
     }

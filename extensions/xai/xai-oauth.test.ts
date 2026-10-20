@@ -170,6 +170,54 @@ describe("xAI OAuth", () => {
     vi.restoreAllMocks();
   });
 
+  it.each([
+    [503, { error: "temporarily_unavailable" }, true],
+    [429, { error: "rate_limited" }, true],
+    [401, { error: "invalid_grant" }, false],
+    [200, { refresh_token: "possibly-consumed" }, false],
+    [200, "invalid JSON", false],
+  ])("owns retry admission for HTTP %s", async (status, body, retryable) => {
+    fetchImpl.mockResolvedValueOnce(jsonResponse(body, status));
+    const error = await refresh().catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(Error);
+    if (retryable) {
+      expect(error).toMatchObject({ oauthRefreshFailure: { status, retryable: true } });
+    } else {
+      expect(error).not.toMatchObject({ oauthRefreshFailure: { retryable: true } });
+    }
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    [Object.assign(new Error("reset before headers"), { code: "ECONNRESET" }), true],
+    [Object.assign(new Error("timed out before headers"), { name: "TimeoutError" }), true],
+    [new Error("unknown provider failure"), false],
+  ])("owns retry admission before any response: %s", async (failure, retryable) => {
+    fetchImpl.mockRejectedValueOnce(failure);
+    const error = await refresh().catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(Error);
+    if (retryable) {
+      expect(error).toMatchObject({ oauthRefreshFailure: { retryable: true } });
+    } else {
+      expect(error).not.toMatchObject({ oauthRefreshFailure: { retryable: true } });
+    }
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
+  it("never restores a success whose body fails with a transport-looking error", async () => {
+    fetchImpl.mockResolvedValueOnce(
+      streamResponse({
+        start(controller) {
+          controller.error(Object.assign(new Error("reset after 200"), { code: "ECONNRESET" }));
+        },
+      }),
+    );
+    const error = await refresh().catch((cause: unknown) => cause);
+    expect(error).toBeInstanceOf(Error);
+    expect(error).not.toMatchObject({ oauthRefreshFailure: { retryable: true } });
+    expect(fetchImpl).toHaveBeenCalledOnce();
+  });
+
   it("preserves https_proxy routing", async () => {
     await withProxyFixture(async (fixture) => {
       for (const key of ["http_proxy", "https_proxy", "all_proxy"]) {

@@ -1,6 +1,8 @@
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
+import { toErrorObject } from "../../infra/errors.js";
 import { continueAuthProfileAuthorization } from "./authorization-lifetime.js";
 import { buildOAuthApiKey } from "./oauth-provider-operations.js";
+import { appendOAuthRefreshCleanupErrors } from "./oauth-refresh-failure.js";
 import { isExactOAuthCredential } from "./oauth-refresh-fence.js";
 import { createFailedOAuthRefreshFence } from "./oauth-refresh-marker.js";
 import type { beginOAuthRefreshObservation } from "./oauth-refresh-observation.js";
@@ -13,11 +15,16 @@ import {
   updateAuthProfileStoreWithLock,
 } from "./store-runtime.js";
 import type { AuthProfileStore, OAuthCredential } from "./types.js";
-import { computeNextProfileUsageStats } from "./usage-failure-state.js";
 
 export type ResolvedOAuthAccess = {
   apiKey: string;
   credential: OAuthCredential;
+};
+
+export type OAuthRefreshFailureSettlement = {
+  supersedingOwner: OAuthCredential | null;
+  validationError: OAuthSettlementCredentialValidationError | null;
+  cleanupErrors: unknown[];
 };
 
 export type OAuthRefreshClaim =
@@ -189,13 +196,14 @@ export async function rollbackOAuthRefreshOwnerClaim(params: {
   profileId: string;
   fence: OAuthCredential;
   original: OAuthCredential;
-  transientFailure?: boolean;
+  assertCurrent?: () => void;
 }): Promise<void> {
   let restored = false;
   const updated = await updateOAuthStore({
     personalStore: params.personalStore,
     agentDir: params.ownerAgentDir,
     profileId: params.profileId,
+    assertCurrent: params.assertCurrent,
     updater: (store) => {
       const existing = store.profiles[params.profileId];
       if (!isExactOAuthCredential(existing, params.fence)) {
@@ -204,14 +212,6 @@ export async function rollbackOAuthRefreshOwnerClaim(params: {
       store.profiles[params.profileId] = continueAuthProfileAuthorization(params.fence, {
         ...params.original,
       });
-      if (params.transientFailure) {
-        store.usageStats ??= {};
-        store.usageStats[params.profileId] = computeNextProfileUsageStats({
-          existing: store.usageStats[params.profileId] ?? {},
-          now: Date.now(),
-          reason: "timeout",
-        });
-      }
       restored = true;
       return true;
     },
@@ -253,13 +253,16 @@ export async function buildValidatedOAuthAccess(
 export async function rollbackTransientOAuthRefreshClaim(
   claim: Extract<OAuthRefreshClaim, { kind: "claimed" }>,
   claims: readonly OAuthRefreshPeerClaim[],
+  assertCurrent: () => void,
 ): Promise<unknown[]> {
+  assertCurrent();
   const errors: unknown[] = [];
   try {
     await rollbackOAuthRefreshPeerClaims({
       profileId: claim.profileId,
       fence: claim.fence,
       claims,
+      assertCurrent,
     });
   } catch (error) {
     errors.push(error);
@@ -271,10 +274,39 @@ export async function rollbackTransientOAuthRefreshClaim(
       profileId: claim.profileId,
       fence: claim.fence,
       original: claim.storedCredential,
-      transientFailure: true,
+      assertCurrent,
     });
   } catch (error) {
     errors.push(error);
+    try {
+      await markOAuthRefreshClaimFailed({
+        personalStore: claim.personalStore,
+        agentDir: claim.ownerAgentDir,
+        profileId: claim.profileId,
+        fence: claim.fence,
+      });
+    } catch (cleanupError) {
+      errors.push(cleanupError);
+    }
   }
   return errors;
+}
+
+export class OAuthSettlementCredentialValidationError extends Error {
+  constructor(cause: unknown, cleanupErrors: readonly unknown[] = []) {
+    const error = toErrorObject(cause, "OAuth credential validation failed");
+    super(error.message, { cause: appendOAuthRefreshCleanupErrors(error, cleanupErrors) });
+    this.name = "OAuthSettlementCredentialValidationError";
+  }
+}
+
+export function validateSettlementCredential(
+  validateCredential: ((credential: OAuthCredential) => void) | undefined,
+  credential: OAuthCredential,
+): void {
+  try {
+    validateCredential?.(credential);
+  } catch (error) {
+    throw new OAuthSettlementCredentialValidationError(error);
+  }
 }

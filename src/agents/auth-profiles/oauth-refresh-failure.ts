@@ -10,7 +10,6 @@ import { sanitizeForLog } from "../../../packages/terminal-core/src/ansi.js";
 import { formatCliCommand } from "../../cli/command-format.js";
 import { toErrorObject } from "../../infra/errors.js";
 import { redactSensitiveText } from "../../logging/redact.js";
-import { extractErrorHttpStatus } from "../../shared/assistant-error-format.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
 import { formatInlineCodeSpan } from "../../shared/markdown-code.js";
 import { formatProviderLoginCommand } from "../../shared/provider-login-command.js";
@@ -178,33 +177,31 @@ function readProviderOAuthRefreshFailure(error: unknown): OAuthRefreshFailurePre
   };
 }
 
-/** Only an explicit credential rejection retires an externally attempted refresh generation. */
+/** Only a provider-owned retry outcome can restore an externally attempted generation. */
 export function isTransientOAuthRefreshFailure(error: unknown): boolean {
+  let retryable = false;
   for (const candidate of collectNestedErrorCandidates(error)) {
     const record = asOptionalRecord(candidate);
-    const presentation = readProviderOAuthRefreshFailure(candidate);
-    const message =
-      readStringField(record, "message") ?? (typeof candidate === "string" ? candidate : "");
-    const reason =
-      presentation?.reason ??
-      classifyOAuthRefreshFailureReason(
-        [message, record?.reason, record?.code, record?.error]
-          .filter((value) => typeof value === "string")
-          .join(" "),
-      );
-    const status = Number(
-      presentation?.status ??
-        record?.status ??
-        record?.statusCode ??
-        extractErrorHttpStatus(message)?.code ??
-        /\b(?:failed|error)\s*\(([45]\d{2})\)/i.exec(message)?.[1],
+    const presentation = asOptionalRecord(record?.oauthRefreshFailure);
+    const reason = classifyOAuthRefreshFailureReason(
+      [record?.message, record?.reason, record?.code, record?.error, presentation?.reason]
+        .filter((value) => typeof value === "string")
+        .join(" "),
     );
-    if (reason || status === 400 || status === 401) {
+    const status = Number(presentation?.status ?? record?.status ?? record?.statusCode);
+    if (
+      reason ||
+      presentation?.retryable === false ||
+      (status >= 200 && status < 500 && status !== 429)
+    ) {
       return false;
     }
+    retryable ||=
+      presentation?.retryable === true ||
+      (candidate instanceof OAuthRefreshFailureError && candidate.retryable === true);
   }
-  // Transport errors and unclassified upstream failures do not prove revocation.
-  return true;
+  // Unknown exceptions, including parser errors after HTTP 200, stay fail-closed.
+  return retryable;
 }
 
 /** Error type that carries provider and classified OAuth refresh failure reason. */

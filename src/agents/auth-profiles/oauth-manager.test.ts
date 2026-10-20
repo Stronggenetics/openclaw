@@ -38,7 +38,7 @@ import {
   type NativeOAuthProviderFixture,
 } from "./oauth-native-provider.test-support.js";
 import { isSettledOAuthRefreshFailure, OAuthManagerRefreshError } from "./oauth-refresh-failure.js";
-import { isPendingOAuthRefreshFence } from "./oauth-refresh-marker.js";
+import { isOAuthRefreshFence, isPendingOAuthRefreshFence } from "./oauth-refresh-marker.js";
 import { loadPersistedAuthProfileStore } from "./persisted.js";
 import { withPersonalAuthProfileStore } from "./personal-store.js";
 import { removeAuthProfilesAcrossOwnerStores } from "./profiles.js";
@@ -149,7 +149,7 @@ describe("createOAuthManager", () => {
       };
       const failure = Object.assign(
         new Error("xAI OAuth refresh failed (503): temporarily unavailable"),
-        { status: 503 },
+        { oauthRefreshFailure: { status: 503, retryable: true } },
       );
       const refreshCredential = vi
         .fn()
@@ -167,11 +167,7 @@ describe("createOAuthManager", () => {
       await expect(resolve()).rejects.toThrow("503");
       const persisted = loadPersistedAuthProfileStore(mainAgentDir)!;
       expect(persisted.profiles[profileId]).toEqual(original);
-      expect(persisted.usageStats?.[profileId]).toMatchObject({ cooldownReason: "timeout" });
-      expect(persisted.usageStats?.[profileId]?.cooldownUntil).toBeGreaterThan(Date.now());
-      expect(persisted.usageStats?.[profileId]?.cooldownUntil).toBeLessThanOrEqual(
-        Date.now() + 30_000,
-      );
+      expect(persisted.usageStats?.[profileId]).toBeUndefined();
       await expect(resolve()).resolves.toMatchObject({ apiKey: rotated.access });
       expect(refreshCredential).toHaveBeenCalledTimes(2);
       expect(refreshCredential.mock.calls[1]?.[0]).toEqual(original);
@@ -732,11 +728,28 @@ describe("createOAuthManager", () => {
       } finally {
         recoveryRead.mockRestore();
       }
-      const restored = ensureAuthProfileStoreWithoutExternalProfiles(agentDir, {
+      const fenced = ensureAuthProfileStoreWithoutExternalProfiles(agentDir, {
         allowKeychainPrompt: false,
       }).profiles[profileId];
-      expect(restored).toEqual(managedCredential);
-      expect(authority.readCurrentCredential()).toEqual(managedCredential);
+      expect(fenced).toMatchObject({
+        type: "oauth",
+        provider: "openai",
+        expires: 1,
+        accountId: "acct-123",
+        email: "user@example.com",
+      });
+      if (fenced?.type !== "oauth") {
+        throw new Error("expected durable OAuth refresh fence");
+      }
+      expect(fenced.access).toMatch(
+        /^openclaw-oauth-refresh-fence:v1:[a-f0-9]{32}:failed:access:[a-f0-9]{64}$/,
+      );
+      expect(fenced.refresh).toMatch(
+        /^openclaw-oauth-refresh-fence:v1:[a-f0-9]{32}:failed:refresh:[a-f0-9]{64}$/,
+      );
+      expect(authority.readCurrentCredential()).toEqual(fenced);
+      expect(JSON.stringify(fenced)).not.toContain("managed-expired-access");
+      expect(JSON.stringify(fenced)).not.toContain("managed-refresh");
     });
   });
 
@@ -996,8 +1009,20 @@ describe("Copilot tenant boundaries", () => {
           await expect(result).rejects.toThrow("OAuth token refresh failed");
         }
         expect(refresh).toHaveBeenCalledTimes(1);
-        // A non-definitive failure retains the exact local credential, never another tenant's.
-        expect(read(agentDir)).toEqual(local);
+        const failed = read(agentDir);
+        expect(failed?.type).toBe("oauth");
+        if (failed?.type !== "oauth") {
+          throw new Error("expected durable failed OAuth refresh fence");
+        }
+        expect(isOAuthRefreshFence(failed)).toBe(true);
+        expect(isPendingOAuthRefreshFence(failed)).toBe(false);
+        expect(failed).toMatchObject({
+          provider: local.provider,
+          enterpriseUrl: local.enterpriseUrl,
+          accountId: local.accountId,
+        });
+        expect(failed.access).not.toContain(local.access);
+        expect(failed.refresh).not.toContain(local.refresh);
         expect(read()).toEqual(renewed);
       });
     },

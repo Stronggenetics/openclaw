@@ -13,10 +13,12 @@ import {
   capturePersonalCredentialAuthority,
   withPersonalCredentialPublication,
 } from "../../state/user-model-account-authority.js";
+import { parseUserModelAuthProfileId } from "../../state/user-model-account-id.js";
 import {
   normalizeUserModelAuthProfile,
   registerUserModelAuthProfileSecrets,
 } from "../../state/user-model-accounts.js";
+import { captureUserProfileModelAccountLinksAuthority } from "../../state/user-profile-events.js";
 import { AUTH_STORE_VERSION } from "./constants.js";
 import { observeCanonicalAuthProfileCredentials } from "./credential-observation.js";
 import { assertPersonalAuthProfileRuntime } from "./runtime-scope.js";
@@ -31,6 +33,8 @@ export type PersonalAuthProfileStore = {
   databasePath: string;
   read(): Promise<AuthProfileStore>;
   readCurrentCredential(this: void): AuthProfileCredential | undefined;
+  /** A retry may not revive a grant whose account selection changed during provider work. */
+  captureRefreshAuthority(): () => void;
   update(
     updater: (store: AuthProfileStore) => boolean,
     assertCurrent?: () => void,
@@ -93,6 +97,21 @@ export function withPersonalAuthProfileStore<T>(
             throw new Error("Personal model account credential has not been prepared");
           },
           read: async () => asStore(await readProfile()),
+          captureRefreshAuthority() {
+            const locator = parseUserModelAuthProfileId(profileId);
+            if (!locator) {
+              throw new Error("Personal refresh requires an exact account ID");
+            }
+            const current = captureUserProfileModelAccountLinksAuthority(
+              context.admission,
+              locator.ownerProfileId,
+            );
+            return () => {
+              if (!current()) {
+                throw new Error("Personal model account selection changed during refresh");
+              }
+            };
+          },
           async update(updater, assertUpdateCurrent) {
             const expected = await readProfile();
             const store = asStore(expected ? structuredClone(expected) : undefined);

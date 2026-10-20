@@ -219,27 +219,61 @@ it.each(
 it.each([
   [
     new Error('OAuth refresh call "refreshOAuthCredential(xai)" exceeded hard timeout (120000ms)'),
-    true,
+    false,
   ],
-  [new Error("xAI OAuth refresh failed (503): unavailable"), true],
-  [Object.assign(new Error("unavailable"), { oauthRefreshFailure: { status: 502 } }), true],
+  [new Error("xAI OAuth refresh failed (503): unavailable"), false],
   [
-    new Error("xAI OAuth refresh failed: fetch failed", {
-      cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }),
+    Object.assign(new Error("unavailable"), {
+      oauthRefreshFailure: { status: 502, retryable: true },
     }),
     true,
   ],
-  [Object.assign(new Error("another process owns refresh"), { code: "refresh_contention" }), true],
-  [new Error("request timed out"), true],
-  [Object.assign(new Error("invalid_grant"), { status: 503 }), false],
-  [new Error("xAI OAuth refresh failed (401): unauthorized"), false],
-  [Object.assign(new Error("fetch failed"), { status: 400 }), false],
-  [new Error("unclassified upstream failure"), true],
-  [new Error("401 Unauthorized"), false],
-  [Object.assign(new Error("fetch failed"), { status: "401" }), false],
-  [new Error("revoked", { cause: new Error("fetch failed") }), false],
+  [
+    Object.assign(new Error("reset before headers"), { oauthRefreshFailure: { retryable: true } }),
+    true,
+  ],
+  [new Error("unclassified upstream failure"), false],
+  [new Error("xAI OAuth token response is missing access_token"), false],
+  [
+    Object.assign(new Error("invalid_grant"), {
+      oauthRefreshFailure: { status: 503, retryable: true },
+    }),
+    false,
+  ],
+  [
+    Object.assign(new Error("unauthorized"), {
+      oauthRefreshFailure: { status: 401, retryable: true },
+    }),
+    false,
+  ],
+  [
+    Object.assign(new Error("forbidden"), {
+      oauthRefreshFailure: { status: 403, retryable: true },
+    }),
+    false,
+  ],
+  [
+    Object.assign(new Error("invalid response"), {
+      oauthRefreshFailure: { status: 200, retryable: true },
+    }),
+    false,
+  ],
+  [
+    Object.assign(new Error("rate limited"), {
+      oauthRefreshFailure: { status: 429, retryable: true },
+    }),
+    true,
+  ],
+  [
+    new Error("wrapped", {
+      cause: Object.assign(new Error("reset"), { oauthRefreshFailure: { retryable: true } }),
+    }),
+    true,
+  ],
+  [Object.assign(new Error("revoked"), { oauthRefreshFailure: { retryable: true } }), false],
+  [Object.assign(new Error("uncertain"), { oauthRefreshFailure: { retryable: false } }), false],
 ] as const)(
-  "classifies transient refresh failures without overriding rejection: %s",
+  "requires provider-owned retry admission without overriding rejection: %s",
   (error, expected) => {
     expect(isTransientOAuthRefreshFailure(error)).toBe(expected);
   },

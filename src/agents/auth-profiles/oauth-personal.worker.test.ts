@@ -23,10 +23,13 @@ import {
   prepareUserModelAccountAuthority,
 } from "../../state/user-model-account-operations.js";
 import {
+  clearUserProfileAuthLink,
   connectUserModelAccount,
+  readSelectedUserModelAccount,
   updateUserModelAuthProfile,
   readUserModelAuthProfile,
 } from "../../state/user-model-accounts.js";
+import { captureUserProfileModelAccountLinksAuthority } from "../../state/user-profile-events.js";
 import { mergeCanonicalUserProfiles } from "../../state/user-profile-writes.js";
 import { linkEmail } from "../../state/user-profile-writes.worker.js";
 import { ensureProfileForEmail } from "../../state/user-profiles.js";
@@ -41,6 +44,7 @@ import {
   mockOAuthProviderOperations,
   type NativeOAuthProviderFixture,
 } from "./oauth-native-provider.test-support.js";
+import { isOAuthRefreshFence, isPendingOAuthRefreshFence } from "./oauth-refresh-marker.js";
 import { resolveApiKeyForProfile } from "./oauth.js";
 import { withPersonalAuthProfileStore } from "./personal-store.js";
 import type { OAuthCredential, ProfileUsageStats, UserModelAuthProfile } from "./types.js";
@@ -628,6 +632,86 @@ it.for(["unacknowledged", "acknowledged"] as const)(
       }
     } finally {
       await terminated;
+    }
+  },
+);
+
+it("preserves an unchanged personal grant after a retryable failure and recovers", async ({
+  profileId,
+  credential,
+  replacement,
+}) => {
+  const refreshCredential = vi
+    .fn()
+    .mockRejectedValueOnce(
+      Object.assign(new Error("503 unavailable"), {
+        oauthRefreshFailure: { status: 503, retryable: true },
+      }),
+    )
+    .mockResolvedValueOnce(replacement);
+  const manager = managerWith({ refreshCredential });
+  await expect(resolve(manager, profileId, credential)).rejects.toThrow();
+  expect(readUserModelAuthProfile(profileId)?.credential).toEqual(credential);
+  expect(readUserModelAuthProfile(profileId)?.usageStats).toBeUndefined();
+  await expect(resolve(manager, profileId, credential)).resolves.toMatchObject({
+    apiKey: replacement.access,
+  });
+  expect(readUserModelAuthProfile(profileId)?.credential).toEqual(replacement);
+  expect(refreshCredential).toHaveBeenCalledTimes(2);
+});
+
+it.for(["disconnect", "reassignment", "same-account-reassignment"] as const)(
+  "rejects retired personal authority after transient %s",
+  async (change, { owner, profileId, credential, replacement }) => {
+    const current = captureUserProfileModelAccountLinksAuthority(
+      captureOpenClawStateWorkerContext().admission,
+      owner.id,
+    );
+    const entered = createDeferredCore();
+    const release = createDeferredCore();
+    const buildApiKey = vi.fn(async () => "should-not-publish");
+    const refreshCredential = vi.fn(async () => {
+      entered.resolve();
+      await release.promise;
+      throw Object.assign(new Error("token endpoint unavailable"), {
+        oauthRefreshFailure: { retryable: true, status: 503 },
+      });
+    });
+    const manager = managerWith({ refreshCredential, buildApiKey });
+    const pending = resolve(manager, profileId, credential).catch((error: unknown) => error);
+    try {
+      await entered.promise;
+      const reconnected = {
+        ...replacement,
+        accountId:
+          change === "same-account-reassignment" ? credential.accountId : "replacement-account",
+      };
+      if (change === "disconnect") {
+        clearUserProfileAuthLink({ profileId: owner.id, provider: credential.provider });
+      } else {
+        connectUserModelAccount({
+          ownerProfileId: owner.id,
+          credential: reconnected,
+          replacement: readSelectedUserModelAccount(owner.id, credential.provider),
+          assertCurrent() {},
+        });
+      }
+      expect(current()).toBe(false);
+      release.resolve();
+      expect(await pending).toBeInstanceOf(Error);
+      expect(buildApiKey).not.toHaveBeenCalled();
+      expect(refreshCredential).toHaveBeenCalledTimes(1);
+      const stored = readUserModelAuthProfile(profileId)?.credential;
+      if (change === "disconnect") {
+        const oauth = stored?.type === "oauth" ? stored : undefined;
+        expect(isOAuthRefreshFence(oauth)).toBe(true);
+        expect(isPendingOAuthRefreshFence(oauth)).toBe(false);
+      } else {
+        expect(stored).toEqual(reconnected);
+      }
+    } finally {
+      release.resolve();
+      await pending;
     }
   },
 );
