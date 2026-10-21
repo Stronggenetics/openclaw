@@ -232,11 +232,16 @@ nonconsumption by itself.
   grants or do not document reuse. A lost or unreadable response, timeout
   after dispatch or post-dispatch 429/5xx stays fenced and asks for reconnect.
 
-Final OAuth errors, such as `invalid_grant`, `invalid_client` or
-`invalid_request`, stay terminal at any status for every owner. Unknown
-exceptions, invalid returned credentials (including a missing `access_token` or
-an invalid replacement refresh token), and explicit token rejection remain
-terminal. A caller timeout does not roll back or
+Final OAuth errors, such as `invalid_grant` or `invalid_client`, stay terminal
+at any status for every owner. xAI also treats `invalid_request` and
+`access_denied` as final. Elsewhere a 4xx carrying them fences the sign-in as
+an unknown failure, and a Google or Microsoft 429/5xx carrying them keeps the
+reusable grant.
+Unknown exceptions, invalid returned credentials (including a missing
+`access_token` or an invalid replacement refresh token), and explicit token
+rejection remain terminal. Vertex ADC stores no refresh claim, so it reports an
+invalid returned token as retryable against its externally owned reusable
+grant. A caller timeout does not roll back or
 retry an in-flight owner. Callers already queued for the same owner and exact
 credential share a settled transient failure instead of replaying that attempt;
 a later new admission can retry. The auth-candidate caller owns health recording and the
