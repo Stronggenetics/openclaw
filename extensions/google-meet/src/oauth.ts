@@ -8,6 +8,11 @@ import {
   waitForLocalOAuthCallback,
 } from "openclaw/plugin-sdk/provider-auth-runtime";
 import { readProviderJsonResponse } from "openclaw/plugin-sdk/provider-http";
+import {
+  createOAuthRefreshError,
+  createOAuthRefreshResponseError,
+  readOAuthRefreshErrorReason,
+} from "openclaw/plugin-sdk/provider-oauth-runtime";
 import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
 import { readGoogleApiErrorDetail } from "./google-api.js";
 
@@ -63,6 +68,7 @@ export function buildGoogleMeetAuthUrl(params: {
 }
 
 async function executeGoogleTokenRequest(body: URLSearchParams) {
+  const refreshing = body.get("grant_type") === "refresh_token";
   const { response, release } = await fetchWithSsrFGuard({
     url: GOOGLE_MEET_TOKEN_URL,
     init: {
@@ -78,7 +84,7 @@ async function executeGoogleTokenRequest(body: URLSearchParams) {
     timeoutMs: GOOGLE_OAUTH_REQUEST_TIMEOUT_MS,
   });
   try {
-    if (!response.ok) {
+    if (!response.ok && !refreshing) {
       const detail = await readGoogleApiErrorDetail(response);
       throw new Error(`Google OAuth token request failed (${response.status}): ${detail}`);
     }
@@ -89,16 +95,41 @@ async function executeGoogleTokenRequest(body: URLSearchParams) {
       scope?: string;
       token_type?: string;
     }>(response, "Google OAuth token", { maxBytes: GOOGLE_OAUTH_TOKEN_JSON_MAX_BYTES });
-    const accessToken = payload.access_token?.trim();
+    if (refreshing && (!response.ok || readOAuthRefreshErrorReason(payload))) {
+      throw createOAuthRefreshResponseError("Google Meet OAuth refresh", response.status, payload);
+    }
+    const accessToken =
+      typeof payload?.access_token === "string" ? payload.access_token.trim() : undefined;
     if (!accessToken) {
-      throw new Error("Google OAuth token response was missing access_token");
+      throw createOAuthRefreshError("Google OAuth token response was missing access_token", {
+        version: 1,
+        phase: "after-token-response",
+        outcome: "unknown",
+        status: response.status,
+      });
+    }
+    if (
+      refreshing &&
+      payload.refresh_token !== undefined &&
+      (typeof payload.refresh_token !== "string" || !payload.refresh_token.trim())
+    ) {
+      throw createOAuthRefreshError("Google Meet OAuth refresh returned an invalid refresh_token", {
+        version: 1,
+        phase: "after-token-response",
+        outcome: "unknown",
+        status: response.status,
+      });
     }
     return {
       accessToken,
       expiresAt: resolveGoogleMeetTokenExpiresAt(payload.expires_in),
-      refreshToken: payload.refresh_token?.trim() || undefined,
-      scope: payload.scope?.trim() || undefined,
-      tokenType: payload.token_type?.trim() || undefined,
+      refreshToken:
+        typeof payload.refresh_token === "string"
+          ? payload.refresh_token.trim() || undefined
+          : undefined,
+      scope: typeof payload.scope === "string" ? payload.scope.trim() || undefined : undefined,
+      tokenType:
+        typeof payload.token_type === "string" ? payload.token_type.trim() || undefined : undefined,
     };
   } finally {
     await release();
@@ -134,7 +165,7 @@ export async function exchangeGoogleMeetAuthCode(params: {
   );
 }
 
-async function refreshGoogleMeetAccessToken(params: {
+export async function refreshGoogleMeetAccessToken(params: {
   clientId: string;
   clientSecret?: string;
   refreshToken: string;
@@ -149,7 +180,7 @@ async function refreshGoogleMeetAccessToken(params: {
   );
 }
 
-function shouldUseCachedGoogleMeetAccessToken(params: {
+export function shouldUseCachedGoogleMeetAccessToken(params: {
   accessToken?: string;
   expiresAt?: number;
 }): boolean {
@@ -187,6 +218,11 @@ export async function resolveGoogleMeetAccessToken(params: {
     clientSecret: params.clientSecret,
     refreshToken: params.refreshToken,
   });
+  if (refreshed.refreshToken && refreshed.refreshToken !== params.refreshToken) {
+    throw new Error(
+      "Google Meet refresh-token rotation requires a durable credential owner. Use the configured Google Meet plugin route, or reauthorize and save the replacement in the external credential owner.",
+    );
+  }
   return {
     accessToken: refreshed.accessToken,
     expiresAt: refreshed.expiresAt,

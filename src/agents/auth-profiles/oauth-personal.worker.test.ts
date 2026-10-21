@@ -14,6 +14,7 @@ import type { SqliteWorkerOperationSettlement } from "../../infra/sqlite-worker-
 import { sqliteWorkerOwnerProbe as probe } from "../../infra/sqlite-worker-owner-probe.test-support.js";
 import { createSqliteWorkerWriteAdmission } from "../../infra/sqlite-worker-store.js";
 import { createDeferredCore } from "../../shared/deferred.js";
+import { createOAuthRefreshError } from "../../shared/oauth-refresh-outcome.js";
 import { captureOpenClawStateWorkerContext } from "../../state/openclaw-state-worker-context.js";
 import * as workerStore from "../../state/openclaw-state-worker-store.js";
 import { withPersonalCredentialPublication } from "../../state/user-model-account-authority.js";
@@ -50,6 +51,15 @@ import { resolveApiKeyForProfile } from "./oauth.js";
 import { withPersonalAuthProfileStore } from "./personal-store.js";
 import type { OAuthCredential, ProfileUsageStats, UserModelAuthProfile } from "./types.js";
 import { reconcileWhamBlock, type WhamCooldownProbeResult } from "./usage-reduction.js";
+
+function nonattemptedRefresh() {
+  return createOAuthRefreshError("Synthetic provider dispatch did not start", {
+    version: 1,
+    phase: "before-dispatch",
+    outcome: "not-attempted",
+    recovery: { kind: "later", evidence: "dispatch-not-started" },
+  });
+}
 
 const authorityUnavailable = "Personal model account authority is unavailable";
 function expectUnavailable(read: () => unknown) {
@@ -646,11 +656,7 @@ it.for(["canonical", "merged"] as const)(
     }
     const refreshCredential = vi
       .fn()
-      .mockRejectedValueOnce(
-        Object.assign(new Error("503 unavailable"), {
-          oauthRefreshFailure: { status: 503, retryable: true },
-        }),
-      )
+      .mockRejectedValueOnce(nonattemptedRefresh())
       .mockResolvedValueOnce(replacement);
     const manager = managerWith({ refreshCredential });
     await expect(resolve(manager, profileId, credential)).rejects.toThrow();
@@ -677,9 +683,7 @@ it.for(["disconnect", "reassignment", "same-account-reassignment"] as const)(
     const refreshCredential = vi.fn(async () => {
       entered.resolve();
       await release.promise;
-      throw Object.assign(new Error("token endpoint unavailable"), {
-        oauthRefreshFailure: { retryable: true, status: 503 },
-      });
+      throw nonattemptedRefresh();
     });
     const manager = managerWith({ refreshCredential, buildApiKey });
     const pending = resolve(manager, profileId, credential).catch((error: unknown) => error);
@@ -740,9 +744,7 @@ it.for(["disconnect", "link-switch", "merge"] as const)(
     const refreshCredential = vi.fn(async () => {
       entered.resolve();
       await release.promise;
-      throw Object.assign(new Error("synthetic endpoint unavailable"), {
-        oauthRefreshFailure: { retryable: true, status: 503 },
-      });
+      throw nonattemptedRefresh();
     });
     const buildApiKey = vi.fn(async () => "should-not-publish");
     const manager = managerWith({ refreshCredential, buildApiKey });

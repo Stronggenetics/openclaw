@@ -2,6 +2,7 @@ import { PlatformMessageNotDispatchedError } from "openclaw/plugin-sdk/error-run
 import { asOptionalRecord as record } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { fetchXService, type XAssertActive } from "./fetch.js";
 import { uploadXMedia, type XMediaUploadParams } from "./media-api.js";
+import { createXOAuthAccess, type XOAuthOptions } from "./oauth.js";
 import { X_POST_READ_MICRO_USD, X_USER_READ_MICRO_USD, xReadCost, xReplyCost } from "./pricing.js";
 import { XBudgetExceededError, type XSpend } from "./spend.js";
 
@@ -186,96 +187,15 @@ function parsePage(input: unknown) {
 
 export type XApiClient = ReturnType<typeof createXApiClient>;
 
-export function createXApiClient(options: {
-  spend: XSpend;
-  clientId: string;
-  clientSecret: string;
-  refreshToken: string;
-  bearerToken?: string;
-  fetch?: XFetch;
-  signal?: AbortSignal;
-  loadRefreshToken?: () => Promise<string | undefined>;
-  saveRefreshToken: (token: string) => Promise<void>;
-  onTokenState?: (state: XTokenState) => void;
-}) {
+export function createXApiClient(options: XOAuthOptions & { spend: XSpend; bearerToken?: string }) {
   let accessToken: string | undefined;
-  let expiresAt = 0;
-  let refreshToken = options.refreshToken;
-  let loadedRefreshToken = false;
-  let pendingRefreshToken: string | undefined;
-  let refreshTask: Promise<void> | undefined;
+  const oauth = createXOAuthAccess(options);
 
   function requestSignal(signal?: AbortSignal): AbortSignal {
     return AbortSignal.any([
       ...[options.signal, signal].filter((value): value is AbortSignal => Boolean(value)),
       AbortSignal.timeout(30_000),
     ]);
-  }
-
-  async function refresh() {
-    options.onTokenState?.("refreshing");
-    try {
-      if (!loadedRefreshToken) {
-        refreshToken = (await options.loadRefreshToken?.()) ?? refreshToken;
-        loadedRefreshToken = true;
-      }
-      if (pendingRefreshToken) {
-        await options.saveRefreshToken(pendingRefreshToken);
-        pendingRefreshToken = undefined;
-      }
-      const response = await fetchXService(
-        "api.x.com",
-        "/2/oauth2/token",
-        {
-          method: "POST",
-          redirect: "error",
-          headers: {
-            Authorization: `Basic ${Buffer.from(`${encodeURIComponent(options.clientId)}:${encodeURIComponent(options.clientSecret)}`).toString("base64")}`,
-            "Content-Type": "application/x-www-form-urlencoded",
-          },
-          body: new URLSearchParams({
-            grant_type: "refresh_token",
-            refresh_token: refreshToken,
-          }).toString(),
-          signal: requestSignal(),
-        },
-        options.fetch,
-      );
-      if (!response.ok) {
-        await response.body?.cancel();
-        throw new XApiError(response.status, "token refresh");
-      }
-      const token = record(await readJson(response));
-      if (!token || typeof token.access_token !== "string" || !token.access_token) {
-        throw new Error("X API returned an invalid token response");
-      }
-      if (typeof token.refresh_token === "string" && token.refresh_token) {
-        // Rotation is committed before any request uses the new access token.
-        refreshToken = token.refresh_token;
-        pendingRefreshToken = refreshToken;
-        await options.saveRefreshToken(refreshToken);
-        pendingRefreshToken = undefined;
-      }
-      accessToken = token.access_token;
-      expiresAt =
-        Date.now() +
-        (typeof token.expires_in === "number" ? Math.max(0, token.expires_in - 30) : 7_170) * 1000;
-      options.onTokenState?.("ready");
-    } catch {
-      accessToken = undefined;
-      options.onTokenState?.("error");
-      throw new Error("X token refresh failed; check the account credentials and token storage");
-    }
-  }
-
-  async function ensureAccessToken() {
-    if (accessToken && Date.now() < expiresAt) {
-      return;
-    }
-    refreshTask ??= refresh().finally(() => {
-      refreshTask = undefined;
-    });
-    await refreshTask;
   }
 
   type RequestOptions = {
@@ -310,7 +230,7 @@ export function createXApiClient(options: {
       let cost = 0;
       try {
         if (!params.appOnly) {
-          await ensureAccessToken();
+          accessToken = await oauth.ensure(params.signal);
         }
         const token = params.appOnly ? options.bearerToken : accessToken;
         if (!token) {
@@ -349,13 +269,14 @@ export function createXApiClient(options: {
               signal,
             },
             options.fetch,
-            params.assertActive
+            params.assertActive || options.assertCurrent
               ? async () => {
                   try {
                     const assertCurrent = await params.assertActive?.();
                     return () => {
                       try {
                         assertCurrent?.();
+                        options.assertCurrent?.();
                       } catch (error) {
                         authorityRejected = true;
                         authorityError = error;
@@ -395,6 +316,7 @@ export function createXApiClient(options: {
           if (!params.appOnly && attempt === 0) {
             await response.body?.cancel().catch(() => {});
             if (accessToken === token) {
+              oauth.invalidate(token);
               accessToken = undefined;
             }
             continue;
@@ -407,7 +329,7 @@ export function createXApiClient(options: {
               token,
               accessToken,
               options.bearerToken,
-              refreshToken,
+              oauth.currentRefreshToken(),
               options.refreshToken,
               options.clientSecret,
             ]);

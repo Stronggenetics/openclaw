@@ -1,3 +1,4 @@
+import { formatErrorMessage } from "@openclaw/normalization-core/error-coercion";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { operatorMcpOAuthIdentity } from "./mcp-oauth-identity.js";
 import { completeMcpOAuthAuthorization, resolveMcpOAuthAccessToken } from "./mcp-oauth.js";
@@ -135,9 +136,22 @@ describe("MCP OAuth redirects", () => {
         });
         const runtimeFetchMock = installRedirectingRuntime(307);
 
-        await expect(resolveMcpOAuthAccessToken({ identity })).rejects.toThrow(
+        const error = await resolveMcpOAuthAccessToken({ identity }).catch(
+          (failure: unknown) => failure,
+        );
+        expect(error).toMatchObject({
+          message: "MCP OAuth refresh outcome is uncertain; sign in again.",
+          oauthRefreshOutcome: { phase: "after-token-response", outcome: "unknown" },
+          cause: expect.objectContaining({
+            message: expect.stringContaining(
+              "Refusing to follow cross-origin redirect for POST request body",
+            ),
+          }),
+        });
+        expect(formatErrorMessage(error)).toContain(
           "Refusing to follow cross-origin redirect for POST request body",
         );
+        await expect(resolveMcpOAuthAccessToken({ identity })).rejects.toThrow(/uncertain/);
         expect(runtimeFetchMock).toHaveBeenCalledTimes(1);
       },
       {

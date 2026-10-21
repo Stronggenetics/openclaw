@@ -19,6 +19,7 @@ import {
 } from "../agents/github-tool-identity.js";
 import { hasErrnoCode } from "../infra/errno.js";
 import { getOrCreatePromise } from "../shared/lazy-promise.js";
+import { isRecoverableOAuthRefreshFailure } from "../shared/oauth-refresh-outcome.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { withOpenClawStateLease } from "../state/openclaw-state-lease.js";
 import { observeUserGitHubConnectionAuthority } from "../state/user-github-connection-events.js";
@@ -389,7 +390,11 @@ export function createPersonalGitHubOAuthLifecycle() {
             await materializeRefresh(owner, id, selection.refresh.operationId, assertOwned);
             return;
           }
-          const operationId = selection.refresh?.operationId ?? randomUUID();
+          // An owner that exited after dispatch cannot prove its rotating grant survived.
+          if (selection.refresh) {
+            return;
+          }
+          const operationId = randomUUID();
           await mutateUserGitHubConnection(
             owner,
             { kind: "beginRefresh", generation: record.generation, profileId: id, operationId },
@@ -398,13 +403,35 @@ export function createPersonalGitHubOAuthLifecycle() {
           assertOwned();
           let result;
           try {
+            // The claim write invalidates the prior read; retain the claimed incarnation for dispatch.
+            const prepared = await prepareUserGitHubConnection(owner);
             // Refresh rotates remote credentials: shutdown drains this bounded exchange, never aborts it.
             result = await refreshGitHubOAuthToken({
               refreshToken: selection.refreshToken,
+              assertCurrent: () => {
+                assertOwned();
+                const selected = prepared.read()?.selection;
+                if (
+                  selected?.kind !== "connected" ||
+                  selected.profileId !== id ||
+                  selected.refresh?.operationId !== operationId
+                ) {
+                  throw new Error("My GitHub refresh ownership changed.");
+                }
+              },
             });
-          } catch {
+          } catch (error) {
             await updateUserGitHubRefreshAsync(
-              { owner, profileId: id, operationId, result: { kind: "failed", failure: "failed" } },
+              {
+                owner,
+                profileId: id,
+                operationId,
+                result: {
+                  kind: "failed",
+                  failure: "failed",
+                  restore: isRecoverableOAuthRefreshFailure(error),
+                },
+              },
               assertOwned,
             );
             return;
@@ -418,6 +445,7 @@ export function createPersonalGitHubOAuthLifecycle() {
                 result: {
                   kind: "failed",
                   failure: result.code === "bad_refresh_token" ? "expired" : "failed",
+                  restore: isRecoverableOAuthRefreshFailure(result.failure),
                 },
               },
               assertOwned,

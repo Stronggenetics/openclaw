@@ -226,11 +226,11 @@ it.each([
     Object.assign(new Error("unavailable"), {
       oauthRefreshFailure: { status: 502, retryable: true },
     }),
-    true,
+    false,
   ],
   [
     Object.assign(new Error("reset before headers"), { oauthRefreshFailure: { retryable: true } }),
-    true,
+    false,
   ],
   [new Error("unclassified upstream failure"), false],
   [new Error("xAI OAuth token response is missing access_token"), false],
@@ -262,13 +262,13 @@ it.each([
     Object.assign(new Error("rate limited"), {
       oauthRefreshFailure: { status: 429, retryable: true },
     }),
-    true,
+    false,
   ],
   [
     new Error("wrapped", {
       cause: Object.assign(new Error("reset"), { oauthRefreshFailure: { retryable: true } }),
     }),
-    true,
+    false,
   ],
   [Object.assign(new Error("revoked"), { oauthRefreshFailure: { retryable: true } }), false],
   [Object.assign(new Error("uncertain"), { oauthRefreshFailure: { retryable: false } }), false],
@@ -278,3 +278,63 @@ it.each([
     expect(isTransientOAuthRefreshFailure(error)).toBe(expected);
   },
 );
+
+const notDispatched = {
+  version: 1,
+  phase: "before-dispatch",
+  outcome: "not-attempted",
+  recovery: { kind: "later", evidence: "dispatch-not-started" },
+};
+const documentedUnchanged = {
+  version: 1,
+  phase: "token-response",
+  outcome: "unchanged",
+  status: 503,
+  recovery: { kind: "later", evidence: "documented-nonconsuming-rejection" },
+};
+const withOutcome = (facts: unknown, cause?: unknown) =>
+  Object.assign(new Error("synthetic provider failure", { cause }), { oauthRefreshOutcome: facts });
+it.each([
+  ["actual non-dispatch evidence", withOutcome(notDispatched), true],
+  ["documented nonconsuming response", withOutcome(documentedUnchanged), true],
+  ["nested valid evidence", new Error("wrapper", { cause: withOutcome(notDispatched) }), true],
+  ["unknown version", withOutcome({ ...notDispatched, version: 2 }), false],
+  [
+    "post-success evidence contradiction",
+    withOutcome({ ...notDispatched, phase: "after-token-response" }),
+    false,
+  ],
+  ["unknown outcome contradiction", withOutcome({ ...notDispatched, outcome: "unknown" }), false],
+  ["malformed status", withOutcome({ ...notDispatched, status: "503" }), false],
+  ["invalid status range", withOutcome({ ...notDispatched, status: 600 }), false],
+  [
+    "unknown recovery evidence",
+    withOutcome({
+      ...notDispatched,
+      recovery: { kind: "later", evidence: "headers-not-received" },
+    }),
+    false,
+  ],
+  ["success status contradiction", withOutcome({ ...documentedUnchanged, status: 200 }), false],
+  ["ordinary configuration rejection", withOutcome({ ...documentedUnchanged, status: 400 }), false],
+  [
+    "nested terminal OAuth error wins",
+    withOutcome(notDispatched, { error: { code: "invalid_grant" }, reason: "provider_error" }),
+    false,
+  ],
+  [
+    "nested explicit veto wins",
+    withOutcome(notDispatched, { oauthRefreshFailure: { retryable: false } }),
+    false,
+  ],
+  [
+    "nested post-success failure wins",
+    withOutcome(
+      notDispatched,
+      withOutcome({ version: 1, phase: "after-token-response", outcome: "unknown" }),
+    ),
+    false,
+  ],
+] as const)("validates provider facts: %s", (_name, error, expected) => {
+  expect(isTransientOAuthRefreshFailure(error)).toBe(expected);
+});

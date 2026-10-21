@@ -211,12 +211,15 @@ During OAuth refresh, the current credential generation is replaced by an inert
 durable marker. Pending markers remain ineligible by default and are ordered only
 by runtime paths that immediately pass them to the settlement-aware resolver.
 Failed markers are terminal and require the operator to authenticate again.
-Native profile refreshes restore their exact claimed credential only after the
-provider reports a narrowly identified retryable outcome. For xAI this means a
-known transport failure or timeout before any response, connection reset, or a
-token-endpoint 429/5xx response. Unknown exceptions, unreadable successful
-responses, invalid returned credentials (including a missing `access_token`), and
-explicit token rejection remain terminal. A caller timeout does not roll back or
+Native profile refreshes and serialized SDK AuthStorage use the same typed
+provider-boundary recovery contract. They restore an exact claimed credential
+only with positive evidence that dispatch never began, or a documented
+provider-specific guarantee that the grant remains reusable. A missing response,
+connection reset, timeout after dispatch, or arbitrary 429/5xx response does not
+prove nonconsumption. This deliberately tightens xAI's former transport/status
+retry policy: uncertain outcomes remain fenced. Unknown exceptions, unreadable
+successful responses, invalid returned credentials (including a missing
+`access_token`), and explicit token rejection remain terminal. A caller timeout does not roll back or
 retry an in-flight owner. Callers already queued for the same owner and exact
 credential share a settled transient failure instead of replaying that attempt;
 a later new admission can retry. The auth-candidate caller owns health recording and the
@@ -241,11 +244,13 @@ retains both the account locator and its current canonical owner's selection
 authority across profile merges. Disconnecting or switching that owner's default
 account during refresh prevents restoration, even for an explicit session pin.
 The failed credential stays terminal and needs reauthentication; a default change
-alone does not invalidate a usable, unrefreshed pin. A lost response
-may already have consumed a rotating refresh token: recovery is best effort,
-and a subsequent definitive rejection still requires authentication. Invalid
-returned credentials and post-success settlement failures remain fail-closed.
-External-tool serialized credential stores retain their separate terminal policy.
+alone does not invalidate a usable, unrefreshed pin. A lost response may already
+have consumed a rotating refresh token and cannot authorize another attempt with
+that grant. Invalid returned credentials and post-success identity or settlement
+failures remain fail-closed. Where an owner already retains a rotated result for
+storage retry, it retries that storage operation, not the old token exchange.
+External tool homes retain their own refresh authority; this contract does not
+transfer their credentials into OpenClaw ownership.
 
 ## Plugin SDK OAuth validation
 
@@ -265,6 +270,69 @@ existing resolution and fallback behavior.
 `openclaw agent exec` preserves the original shared-store root when switching to temporary run state. Its bounded credential scope reads portable `api_key` and `token` profiles from that shared store without persisting copies; the configured agent's local profiles still win. Shared OAuth profiles are excluded from this temporary scope, even with `copyToAgents: true`, so the run does not acquire another refresh owner. `--auth-env-only` disables stored credential access entirely.
 
 Auth writes that explicitly select a state directory, including isolated QA staging, use that directory's shared store for ownership and OAuth deduplication. Their runtime publication and rollback retain the same owner; another process-local state root is not an inherited base. An unrelated outer database may be older, newer, or unreadable without blocking an isolated write, but an unreadable or newer database in the selected target still blocks the write. Writes without an explicit state directory retain the normal ambient state and agent-directory configuration.
+
+## Provider-boundary OAuth outcomes
+
+`openclaw/plugin-sdk/provider-oauth-runtime` exports `OAuthRefreshOutcome`,
+`createOAuthRefreshError`, `createOAuthRefreshResponseError`, and
+`isRecoverableOAuthRefreshFailure`. Existing `refreshOAuth` and registered
+`OAuthProviderInterface.refreshToken` signatures are unchanged: return the
+refreshed credential or throw. The versioned structural error facts work across
+plugin module graphs; they contain no tokens, raw responses, or client secrets.
+
+An adapter that knows dispatch did not begin can throw:
+
+```ts
+throw createOAuthRefreshError(
+  "OAuth refresh did not start",
+  {
+    version: 1,
+    phase: "before-dispatch",
+    outcome: "not-attempted",
+    recovery: { kind: "later", evidence: "dispatch-not-started" },
+  },
+  { cause },
+);
+```
+
+Use that evidence only when the adapter actually knows no request began. Merely
+catching a fetch rejection before headers is insufficient. Response-level
+`unchanged` outcomes require a documented guarantee for that route and grant;
+status alone is not evidence. Nested terminal OAuth reasons override recovery
+hints. Unknown versions, contradictory facts, malformed success, and errors
+after successful exchange cannot authorize restoration. Legacy
+`oauthRefreshFailure.retryable` booleans remain presentation metadata but no
+longer grant recovery permission by themselves.
+
+The credential owner still controls exact-generation claims, current authority,
+conditional commit, and cleanup. An adapter cannot manufacture a receipt that
+those durable steps completed. Model profiles, serialized SDK storage, and
+non-model account owners share the classification, not a universal HTTP client
+or a second credential manager.
+
+### Non-model and externally owned routes
+
+GitHub shared/personal accounts, MCP client OAuth, Teams delegated accounts,
+X user OAuth, managed Meet accounts, and refreshable Twitch accounts retain
+their existing account/storage boundaries. Returned rotation must be persisted
+conditionally before access is published. Caller cancellation ends observation,
+not an already-dispatched owner's settlement.
+
+Vertex `authorized_user` ADC remains read-only external input. Its selected file
+and client/grant identity scope the access cache and pending refresh claim. An
+unexpected replacement refresh token is an actionable unsupported-rotation
+error, never silently discarded or written back to gcloud's file. Other ADC
+kinds continue through GoogleAuth. One-shot Meet grants likewise cannot silently
+discard returned rotation; managed Meet accounts have a conditional plugin-state
+owner.
+
+Copilot model credentials are a local projection, not a rotating refresh-token
+HTTP route. Anthropic setup tokens, OpenRouter API-key provisioning, static
+channel tokens, and tool-owned Claude/Codex/Muse/MiniMax homes are not native
+refresh grants. Gemini CLI dispatch is tool-owned; historical Gemini profiles
+lack a native OpenClaw refresh adapter with verified original client provenance.
+That native route remains explicitly unsupported rather than borrowing a
+different Google client or taking over a CLI home.
 
 ## Personal model accounts
 

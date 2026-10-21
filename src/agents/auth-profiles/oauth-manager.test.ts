@@ -16,6 +16,7 @@ import {
   SqliteWorkerError,
 } from "../../infra/sqlite-worker-contract.js";
 import { readDatabasePathIdentitySync } from "../../infra/sqlite-worker-identity.js";
+import { createOAuthRefreshError } from "../../shared/oauth-refresh-outcome.js";
 import {
   closeOpenClawStateDatabaseForTest,
   openOpenClawStateDatabase,
@@ -147,10 +148,12 @@ describe("createOAuthManager", () => {
         refresh: "rotated-refresh",
         expires: Date.now() + 600_000,
       };
-      const failure = Object.assign(
-        new Error("xAI OAuth refresh failed (503): temporarily unavailable"),
-        { oauthRefreshFailure: { status: 503, retryable: true } },
-      );
+      const failure = createOAuthRefreshError("OAuth dispatch did not start", {
+        version: 1,
+        phase: "before-dispatch",
+        outcome: "not-attempted",
+        recovery: { kind: "later", evidence: "dispatch-not-started" },
+      });
       const refreshCredential = vi
         .fn()
         .mockRejectedValueOnce(failure)
@@ -164,7 +167,7 @@ describe("createOAuthManager", () => {
           credential: original,
           agentDir: mainAgentDir,
         });
-      await expect(resolve()).rejects.toThrow("503");
+      await expect(resolve()).rejects.toThrow("dispatch did not start");
       const persisted = loadPersistedAuthProfileStore(mainAgentDir)!;
       expect(persisted.profiles[profileId]).toEqual(original);
       expect(persisted.usageStats?.[profileId]).toBeUndefined();

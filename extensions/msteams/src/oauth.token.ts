@@ -3,6 +3,11 @@ import {
   createProviderHttpError,
   readProviderJsonResponse,
 } from "openclaw/plugin-sdk/provider-http";
+import {
+  createOAuthRefreshError,
+  createOAuthRefreshResponseError,
+  readOAuthRefreshErrorReason,
+} from "openclaw/plugin-sdk/provider-oauth-runtime";
 import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
 import { isRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import {
@@ -34,7 +39,8 @@ function parseMSTeamsTokenResponse(data: unknown, failureLabel: string): MSTeams
     typeof data.access_token !== "string" ||
     !data.access_token ||
     expiresAt === undefined ||
-    (data.refresh_token !== undefined && typeof data.refresh_token !== "string") ||
+    (data.refresh_token !== undefined &&
+      (typeof data.refresh_token !== "string" || !data.refresh_token)) ||
     (data.scope !== undefined && typeof data.scope !== "string")
   ) {
     throw new Error(`MSTeams ${failureLabel} failed: invalid token response fields`);
@@ -53,6 +59,7 @@ async function fetchMSTeamsTokens(params: {
   body: URLSearchParams;
   auditContext: string;
   failureLabel: string;
+  refresh: boolean;
 }): Promise<MSTeamsTokenResponse> {
   const { response, release } = await fetchWithSsrFGuard({
     url: params.tokenUrl,
@@ -69,14 +76,50 @@ async function fetchMSTeamsTokens(params: {
   });
 
   try {
-    if (!response.ok) {
+    if (!response.ok && !params.refresh) {
       throw await createProviderHttpError(response, `MSTeams ${params.failureLabel} failed`);
     }
-    const data = await readProviderJsonResponse<unknown>(
-      response,
-      `MSTeams ${params.failureLabel} failed`,
-    );
-    return parseMSTeamsTokenResponse(data, params.failureLabel);
+    let data: unknown;
+    try {
+      data = await readProviderJsonResponse<unknown>(
+        response,
+        `MSTeams ${params.failureLabel} failed`,
+      );
+    } catch (cause) {
+      if (!params.refresh) {
+        throw cause;
+      }
+      throw createOAuthRefreshError(
+        "MSTeams refresh response could not be read",
+        {
+          version: 1,
+          phase: "after-token-response",
+          outcome: "unknown",
+          status: response.status,
+        },
+        { cause },
+      );
+    }
+    if (params.refresh && (!response.ok || readOAuthRefreshErrorReason(data))) {
+      throw createOAuthRefreshResponseError("MSTeams token refresh", response.status, data);
+    }
+    try {
+      return parseMSTeamsTokenResponse(data, params.failureLabel);
+    } catch (cause) {
+      if (!params.refresh) {
+        throw cause;
+      }
+      throw createOAuthRefreshError(
+        "MSTeams refresh response fields are invalid",
+        {
+          version: 1,
+          phase: "after-token-response",
+          outcome: "unknown",
+          status: response.status,
+        },
+        { cause },
+      );
+    }
   } finally {
     await release();
   }
@@ -106,6 +149,7 @@ async function requestMSTeamsDelegatedTokens(params: {
     body,
     auditContext: params.auditContext,
     failureLabel: params.failureLabel,
+    refresh: params.grantType === "refresh_token",
   });
 
   return {

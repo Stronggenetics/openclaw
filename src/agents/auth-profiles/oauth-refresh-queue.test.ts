@@ -4,6 +4,10 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import { resetFileLockStateForTest } from "../../plugin-sdk/file-lock.js";
 import { AsyncWorkScope } from "../../shared/async-work-scope.js";
 import { createDeferredCore } from "../../shared/deferred.js";
+import {
+  createOAuthRefreshError,
+  type OAuthRefreshOutcome,
+} from "../../shared/oauth-refresh-outcome.js";
 import { captureEnv } from "../../test-utils/env.js";
 import { getOAuthProviderRuntimeMocks } from "./oauth-common-mocks.test-support.js";
 import "./oauth-external-auth-passthrough.test-support.js";
@@ -146,9 +150,22 @@ describe("OAuth refresh failure ownership", () => {
     expect(results.filter((result) => result === null)).toHaveLength(1);
   });
 
-  it.each([429, 503])(
-    "shares a transient %s failure only with queued callers for the same path and generation",
-    async (status) => {
+  it.each<OAuthRefreshOutcome>([
+    {
+      version: 1,
+      phase: "before-dispatch",
+      outcome: "not-attempted",
+      recovery: { kind: "later", evidence: "dispatch-not-started" },
+    },
+    {
+      version: 1,
+      phase: "token-response",
+      outcome: "unchanged",
+      recovery: { kind: "later", evidence: "documented-reusable-grant" },
+    },
+  ])(
+    "shares a positively safe $phase failure only with queued callers for the same path and generation",
+    async (facts) => {
       const profileId = "xai:cohort";
       const credential: OAuthCredential = {
         type: "oauth",
@@ -198,9 +215,7 @@ describe("OAuth refresh failure ownership", () => {
         });
       });
       const failure = () =>
-        Object.assign(new Error("synthetic token endpoint unavailable"), {
-          oauthRefreshFailure: { status, retryable: true },
-        });
+        createOAuthRefreshError("synthetic provider proves grant unchanged", facts);
       const refreshCredential = vi
         .fn<(input: OAuthCredential) => Promise<OAuthCredential>>()
         .mockImplementationOnce(async () => {

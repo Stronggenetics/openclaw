@@ -1,9 +1,4 @@
-import {
-  collectErrorGraphCandidates,
-  extractErrorCode,
-  formatErrorMessage,
-  readErrorName,
-} from "openclaw/plugin-sdk/error-runtime";
+import { formatErrorMessage } from "openclaw/plugin-sdk/error-runtime";
 import { matchesNoProxy, resolveEnvHttpProxyAgentOptions } from "openclaw/plugin-sdk/fetch-runtime";
 import {
   positiveSecondsToSafeMilliseconds,
@@ -17,8 +12,13 @@ import {
   type OAuthCredential,
   type ProviderAuthResult,
 } from "openclaw/plugin-sdk/provider-auth";
+import {
+  createOAuthRefreshError,
+  createOAuthRefreshResponseError,
+  readOAuthRefreshErrorReason,
+} from "openclaw/plugin-sdk/provider-oauth-runtime";
 import { readResponseWithLimit } from "openclaw/plugin-sdk/response-limit-runtime";
-import { sleep, sleepWithAbort } from "openclaw/plugin-sdk/runtime-env";
+import { sleepWithAbort } from "openclaw/plugin-sdk/runtime-env";
 import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
 import {
   asOptionalRecord,
@@ -40,8 +40,6 @@ const XAI_LEGACY_OAUTH_TOKEN_ENDPOINT = `${XAI_OAUTH_ISSUER}/oauth/token`;
 const XAI_OAUTH_TIMEOUT_MS = 5 * 60 * 1000;
 const XAI_OAUTH_FETCH_TIMEOUT_MS = 30 * 1000;
 const XAI_OAUTH_RESPONSE_MAX_BYTES = 16 * 1024 * 1024;
-const XAI_OAUTH_REFRESH_MAX_ATTEMPTS = 3;
-const XAI_OAUTH_REFRESH_RETRY_DELAY_MS = 250;
 const XAI_DEVICE_CODE_DEFAULT_INTERVAL_MS = 5 * 1000;
 const XAI_DEVICE_CODE_MIN_INTERVAL_MS = 1 * 1000;
 const XAI_DEVICE_CODE_SLOW_DOWN_INCREMENT_MS = 5 * 1000;
@@ -54,8 +52,6 @@ type XaiOAuthFetchOptions = {
   assertCurrent?: () => void;
   onResponse?: (status: number) => void;
 };
-
-type XaiOAuthResponseBody = Awaited<ReturnType<typeof readResponseBody>>;
 
 function fetchXaiOAuth(url: string, options: XaiOAuthFetchOptions, body?: Record<string, string>) {
   // The guard rechecks authority after DNS and each redirect; raw fetch follows
@@ -126,8 +122,11 @@ async function readJsonResponse(
   if (!response.ok) {
     const json = asOptionalRecord(body.json);
     const errorText = json?.error_description ?? json?.error;
-    throw new Error(
-      `${context} failed (${response.status})${typeof errorText === "string" ? `: ${errorText}` : ""}`,
+    throw Object.assign(
+      new Error(
+        `${context} failed (${response.status})${typeof errorText === "string" ? `: ${errorText}` : ""}`,
+      ),
+      { status: response.status, reason: readOAuthRefreshErrorReason(body.json) },
     );
   }
   return body.json;
@@ -150,7 +149,7 @@ function parseXaiOAuthTokenResponse(
     throw new Error("xAI OAuth token response is missing access_token");
   }
   const refreshToken = readNonBlankString(json.refresh_token);
-  if (options.requireRefreshToken && !refreshToken) {
+  if ((options.requireRefreshToken || json.refresh_token !== undefined) && !refreshToken) {
     throw new Error(
       "xAI OAuth token response is missing refresh_token. Re-run the login; if the issue persists, the OAuth client is not configured to issue refresh tokens (commonly because the offline_access scope was rejected).",
     );
@@ -184,83 +183,72 @@ async function requestXaiOAuthRefresh(
 ): Promise<XaiOAuthTokenResponse> {
   const endpoint = requireTrustedXaiOAuthEndpoint(tokenEndpoint, "token endpoint");
   const context = "xAI OAuth refresh";
-
-  for (let attempt = 1; ; attempt += 1) {
-    let response: Response;
-    let body: XaiOAuthResponseBody;
-    let responseReceived = false;
-    try {
-      const result = await fetchXaiOAuth(
-        endpoint,
-        {
-          onResponse: () => {
-            responseReceived = true;
-          },
-        },
-        {
-          grant_type: "refresh_token",
-          client_id: XAI_OAUTH_CLIENT_ID,
-          refresh_token: refreshToken,
-        },
-      );
-      response = result.response;
-      // Successful refresh responses rotate stored credentials. Reject corrupted
-      // UTF-8 rather than persisting replacement characters as token bytes.
-      body = await readResponseBody(result, { fatalUtf8: response.ok });
-    } catch (err) {
-      const error = new Error(`${context} failed: ${formatErrorMessage(err)}`, { cause: err });
-      // Never replay a successful or unreadable response. Only identified pre-response
-      // transport failures opt into manager recovery after this request has settled.
-      if (
-        !responseReceived &&
-        collectErrorGraphCandidates(err, (current) => [current.cause]).some(
-          (candidate) =>
-            readErrorName(candidate) === "TimeoutError" ||
-            [
-              "ECONNRESET",
-              "ETIMEDOUT",
-              "ECONNREFUSED",
-              "ENOTFOUND",
-              "EAI_AGAIN",
-              "UND_ERR_CONNECT_TIMEOUT",
-              "UND_ERR_HEADERS_TIMEOUT",
-              "UND_ERR_SOCKET",
-            ].includes(extractErrorCode(candidate) ?? ""),
-        )
-      ) {
-        Object.assign(error, { oauthRefreshFailure: { retryable: true } });
-      }
-      throw error;
+  let result: Awaited<ReturnType<typeof fetchXaiOAuth>>;
+  try {
+    result = await fetchXaiOAuth(
+      endpoint,
+      {},
+      {
+        grant_type: "refresh_token",
+        client_id: XAI_OAUTH_CLIENT_ID,
+        refresh_token: refreshToken,
+      },
+    );
+  } catch (cause) {
+    // No headers does not mean the server did not consume a rotating grant.
+    throw createOAuthRefreshError(
+      context + " transport failed",
+      {
+        version: 1,
+        phase: "token-response",
+        outcome: "unknown",
+      },
+      { cause },
+    );
+  }
+  const { response } = result;
+  let body: Awaited<ReturnType<typeof readResponseBody>>;
+  try {
+    body = await readResponseBody(result, { fatalUtf8: true });
+  } catch (cause) {
+    throw createOAuthRefreshError(
+      context + " response could not be read",
+      {
+        version: 1,
+        phase: "token-response",
+        outcome: "unknown",
+        status: response.status,
+      },
+      { cause },
+    );
+  }
+  if (!response.ok || asOptionalRecord(body.json)?.error !== undefined) {
+    const error = createOAuthRefreshResponseError(context, response.status, body.json);
+    // Keep actionable challenge diagnostics without inferring nonconsumption or replaying.
+    if (
+      !asOptionalRecord(body.json)?.error &&
+      (response.headers.get("cf-mitigated") === "challenge" ||
+        /text\/html/i.test(response.headers.get("content-type") ?? "") ||
+        /<!doctype html|<html\b/i.test(body.text))
+    ) {
+      error.message +=
+        ": xAI returned an HTML/Cloudflare challenge instead of OAuth JSON. Re-run xAI OAuth login if it persists.";
     }
-    if (response.ok) {
-      return parseXaiOAuthTokenResponse(body.json);
-    }
-
-    const status = response.status;
-    // Structured OAuth errors are final; only intermediary HTML challenges are retryable.
-    const hasStructuredError = Boolean(readStringValue(asOptionalRecord(body.json)?.error));
-    let isCloudflareChallenge = false;
-    if (!hasStructuredError) {
-      const contentType = response.headers.get("content-type") ?? "";
-      isCloudflareChallenge =
-        response.headers.get("cf-mitigated") === "challenge" ||
-        /text\/html/i.test(contentType) ||
-        /<!doctype html|<html\b/i.test(body.text) ||
-        /\b(?:cloudflare|attention required|just a moment|enable javascript and cookies|challenge-platform)\b/i.test(
-          body.text,
-        );
-    }
-    const message = isCloudflareChallenge
-      ? `${context} failed (${status}): xAI returned an HTML/Cloudflare challenge ` +
-        "instead of OAuth JSON. xAI may be blocking the automated token refresh; try again later " +
-        "or re-run xAI OAuth login."
-      : formatXaiOAuthError({ context, status, body: body.json });
-    if (attempt >= XAI_OAUTH_REFRESH_MAX_ATTEMPTS || !isCloudflareChallenge) {
-      throw Object.assign(new Error(message), {
-        oauthRefreshFailure: { status, retryable: status === 429 || status >= 500 },
-      });
-    }
-    await sleep(XAI_OAUTH_REFRESH_RETRY_DELAY_MS);
+    throw error;
+  }
+  try {
+    return parseXaiOAuthTokenResponse(body.json);
+  } catch (cause) {
+    throw createOAuthRefreshError(
+      context + " returned invalid credentials",
+      {
+        version: 1,
+        phase: "after-token-response",
+        outcome: "unknown",
+        status: response.status,
+      },
+      { cause },
+    );
   }
 }
 
@@ -382,7 +370,22 @@ async function resolveXaiOAuthRefreshTokenEndpoint(credential: OAuthCredential):
   // credential still points at the retired endpoint, so refresh writes back the
   // current OAuth token endpoint.
   if (!cachedEndpoint || isLegacyXaiOAuthTokenEndpoint(cachedEndpoint)) {
-    const discovery = await fetchXaiOAuthDiscoveryDocument();
+    let discovery: Record<string, unknown>;
+    try {
+      discovery = await fetchXaiOAuthDiscoveryDocument();
+    } catch (cause) {
+      // Discovery is a GET before the refresh grant is submitted at all.
+      throw createOAuthRefreshError(
+        "xAI OAuth discovery failed before refresh dispatch",
+        {
+          version: 1,
+          phase: "before-dispatch",
+          outcome: "not-attempted",
+          recovery: { kind: "later", evidence: "dispatch-not-started" },
+        },
+        { cause },
+      );
+    }
     if (typeof discovery.token_endpoint !== "string") {
       throw new Error("xAI OAuth discovery response is missing the token endpoint");
     }

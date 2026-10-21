@@ -1,5 +1,4 @@
 import { normalizeProviderId } from "@openclaw/model-catalog-core/provider-id";
-import { collectNestedErrorCandidates } from "@openclaw/normalization-core/error-coercion";
 import {
   asOptionalObjectRecord,
   asOptionalRecord,
@@ -12,6 +11,7 @@ import { toErrorObject } from "../../infra/errors.js";
 import { redactSensitiveText } from "../../logging/redact.js";
 import { resolveGlobalSingleton } from "../../shared/global-singleton.js";
 import { formatInlineCodeSpan } from "../../shared/markdown-code.js";
+import { isRecoverableOAuthRefreshFailure } from "../../shared/oauth-refresh-outcome.js";
 import { formatProviderLoginCommand } from "../../shared/provider-login-command.js";
 import type { AuthProfileFailureReason, AuthProfileStore, OAuthCredential } from "./types.js";
 
@@ -177,32 +177,8 @@ function readProviderOAuthRefreshFailure(error: unknown): OAuthRefreshFailurePre
   };
 }
 
-/** Only a provider-owned retry outcome can restore an externally attempted generation. */
-export function isTransientOAuthRefreshFailure(error: unknown): boolean {
-  let retryable = false;
-  for (const candidate of collectNestedErrorCandidates(error)) {
-    const record = asOptionalRecord(candidate);
-    const presentation = asOptionalRecord(record?.oauthRefreshFailure);
-    const reason = classifyOAuthRefreshFailureReason(
-      [record?.message, record?.reason, record?.code, record?.error, presentation?.reason]
-        .filter((value) => typeof value === "string")
-        .join(" "),
-    );
-    const status = Number(presentation?.status ?? record?.status ?? record?.statusCode);
-    if (
-      reason ||
-      presentation?.retryable === false ||
-      (status >= 200 && status < 500 && status !== 429)
-    ) {
-      return false;
-    }
-    retryable ||=
-      presentation?.retryable === true ||
-      (candidate instanceof OAuthRefreshFailureError && candidate.retryable === true);
-  }
-  // Unknown exceptions, including parser errors after HTTP 200, stay fail-closed.
-  return retryable;
-}
+/** Recovery needs positive protocol evidence, independent of presentation and cleanup receipts. */
+export const isTransientOAuthRefreshFailure = isRecoverableOAuthRefreshFailure;
 
 /** Error type that carries provider and classified OAuth refresh failure reason. */
 export class OAuthRefreshFailureError extends Error {

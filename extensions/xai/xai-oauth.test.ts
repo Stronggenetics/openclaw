@@ -6,6 +6,7 @@ import {
   createTestWizardPrompter,
 } from "openclaw/plugin-sdk/plugin-test-runtime";
 import { clearLiveCatalogCacheForTests } from "openclaw/plugin-sdk/provider-catalog-live-runtime";
+import { isRecoverableOAuthRefreshFailure } from "openclaw/plugin-sdk/provider-oauth-runtime";
 import { jsonResponse, requestUrl, withProxyFixture } from "openclaw/plugin-sdk/test-env";
 import { markdownToIR } from "openclaw/plugin-sdk/text-chunking";
 import { fetch as undiciFetch, MockAgent, type Dispatcher } from "undici";
@@ -171,36 +172,32 @@ describe("xAI OAuth", () => {
   });
 
   it.each([
-    [503, { error: "temporarily_unavailable" }, true],
-    [429, { error: "rate_limited" }, true],
-    [401, { error: "invalid_grant" }, false],
-    [200, { refresh_token: "possibly-consumed" }, false],
-    [200, "invalid JSON", false],
-  ])("owns retry admission for HTTP %s", async (status, body, retryable) => {
+    [503, { error: "temporarily_unavailable" }, "unknown"],
+    [429, { error: "rate_limited" }, "unknown"],
+    [401, { error: "invalid_grant" }, "rejected"],
+    [200, { refresh_token: "possibly-consumed" }, "unknown"],
+    [200, "invalid JSON", "unknown"],
+  ])("never infers nonconsumption from HTTP %s", async (status, body, outcome) => {
     fetchImpl.mockResolvedValueOnce(jsonResponse(body, status));
     const error = await refresh().catch((cause: unknown) => cause);
     expect(error).toBeInstanceOf(Error);
-    if (retryable) {
-      expect(error).toMatchObject({ oauthRefreshFailure: { status, retryable: true } });
-    } else {
-      expect(error).not.toMatchObject({ oauthRefreshFailure: { retryable: true } });
-    }
+    expect(error).toMatchObject({ oauthRefreshOutcome: { version: 1, status, outcome } });
+    expect(isRecoverableOAuthRefreshFailure(error)).toBe(false);
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
   it.each([
-    [Object.assign(new Error("reset before headers"), { code: "ECONNRESET" }), true],
-    [Object.assign(new Error("timed out before headers"), { name: "TimeoutError" }), true],
-    [new Error("unknown provider failure"), false],
-  ])("owns retry admission before any response: %s", async (failure, retryable) => {
+    Object.assign(new Error("reset before headers"), { code: "ECONNRESET" }),
+    Object.assign(new Error("timed out before headers"), { name: "TimeoutError" }),
+    new Error("unknown provider failure"),
+  ])("does not infer nonconsumption before response headers: %s", async (failure) => {
     fetchImpl.mockRejectedValueOnce(failure);
     const error = await refresh().catch((cause: unknown) => cause);
     expect(error).toBeInstanceOf(Error);
-    if (retryable) {
-      expect(error).toMatchObject({ oauthRefreshFailure: { retryable: true } });
-    } else {
-      expect(error).not.toMatchObject({ oauthRefreshFailure: { retryable: true } });
-    }
+    expect(error).toMatchObject({
+      oauthRefreshOutcome: { version: 1, phase: "token-response", outcome: "unknown" },
+    });
+    expect(isRecoverableOAuthRefreshFailure(error)).toBe(false);
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
@@ -215,6 +212,10 @@ describe("xAI OAuth", () => {
     const error = await refresh().catch((cause: unknown) => cause);
     expect(error).toBeInstanceOf(Error);
     expect(error).not.toMatchObject({ oauthRefreshFailure: { retryable: true } });
+    expect(error).toMatchObject({
+      oauthRefreshOutcome: { version: 1, phase: "token-response", outcome: "unknown" },
+    });
+    expect(isRecoverableOAuthRefreshFailure(error)).toBe(false);
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
@@ -239,7 +240,9 @@ describe("xAI OAuth", () => {
           return jsonResponse({ error: "temporarily_unavailable" }, 503);
         },
       );
-      await expect(refresh()).rejects.toThrow("temporarily_unavailable");
+      await expect(refresh()).rejects.toMatchObject({
+        oauthRefreshOutcome: { status: 503, outcome: "unknown" },
+      });
       expect(fetchImpl).toHaveBeenCalledOnce();
       expect(fixture.connections).toEqual(["http:auth.x.ai"]);
       expect(fixture.originRoutes).toEqual([]);
@@ -383,12 +386,11 @@ describe("xAI OAuth", () => {
       expect(requestUrl(url)).toBe(request);
       throw new Error(message);
     });
-    await expect(refresh(endpoint)).rejects.toThrow(message);
+    await expect(refresh(endpoint)).rejects.toMatchObject({ cause: { message } });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("retries transient HTML refresh failures before succeeding", async () => {
-    vi.useFakeTimers();
+  it("reports an intermediary challenge without replaying a possibly consumed grant", async () => {
     mockResponses(
       new Response("<!DOCTYPE html><html><body>Attention Required! Cloudflare</body></html>", {
         status: 403,
@@ -400,13 +402,13 @@ describe("xAI OAuth", () => {
       }),
       jsonResponse({ access_token: "access-2", expires_in: 120 }),
     );
-    const pending = refresh();
-    await vi.advanceTimersByTimeAsync(250);
-    await vi.advanceTimersByTimeAsync(250);
-    const refreshed = await pending;
-
-    expect(fetchImpl).toHaveBeenCalledTimes(3);
-    expect(refreshed).toMatchObject({ access: "access-2", refresh: "refresh-1" });
+    const error = await refresh().catch((cause: unknown) => cause);
+    expect(error).toMatchObject({
+      message: expect.stringContaining("HTML/Cloudflare challenge"),
+      oauthRefreshOutcome: { outcome: "unknown", status: 403 },
+    });
+    expect(isRecoverableOAuthRefreshFailure(error)).toBe(false);
+    expect(fetchImpl).toHaveBeenCalledOnce();
   });
 
   it("preserves the cached xAI expiry when token lifetimes overflow safe milliseconds", async () => {

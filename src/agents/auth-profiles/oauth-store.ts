@@ -5,6 +5,7 @@ import { isUserModelAuthProfileId } from "../../state/user-model-account-id.js";
 import { continueAuthProfileAuthorization } from "./authorization-lifetime.js";
 import { authProfilesLog } from "./constants.js";
 import { hasUsableOAuthCredential } from "./credential-state.js";
+import { shouldMirrorRefreshedOAuthCredential } from "./oauth-identity.js";
 import { buildOAuthApiKey } from "./oauth-provider-operations.js";
 import { appendOAuthRefreshCleanupErrors } from "./oauth-refresh-failure.js";
 import { isExactOAuthCredential } from "./oauth-refresh-fence.js";
@@ -47,6 +48,7 @@ export type OAuthRefreshClaim =
   | {
       kind: "claimed";
       personalStore?: PersonalAuthProfileStore;
+      assertPersonalRefreshCurrent?: () => void;
       profileId: string;
       credential: OAuthCredential;
       storedCredential: OAuthCredential;
@@ -105,6 +107,70 @@ export async function adoptNewerMainOAuthCredential(params: {
     });
   }
   return null;
+}
+
+/** Validate and mirror the current shared credential before peer settlement. */
+export async function resolveAuthoritativeSharedOAuthCredentialUnderLock(params: {
+  profileId: string;
+  candidate: OAuthCredential;
+  validateCredential?: (credential: OAuthCredential) => void;
+}): Promise<OAuthCredential | undefined> {
+  let validatedAuthoritative = false;
+  const acceptAuthoritative = (credential: OAuthCredential): boolean => {
+    try {
+      validateSettlementCredential(params.validateCredential, credential);
+      validatedAuthoritative = true;
+      return true;
+    } catch {
+      authProfilesLog.warn(
+        "refused shared OAuth credential during settlement: credential validation failed",
+        {
+          profileId: params.profileId,
+        },
+      );
+      return false;
+    }
+  };
+  const updated = await updateAuthProfileStoreWithLock({
+    agentDir: undefined,
+    profileId: params.profileId,
+    sharedStoreWrite: true,
+    updater: (store) => {
+      const existing = store.profiles[params.profileId];
+      const decision = shouldMirrorRefreshedOAuthCredential({
+        existing,
+        refreshed: params.candidate,
+      });
+      if (!decision.shouldMirror) {
+        if (decision.reason === "identity-mismatch-or-regression") {
+          authProfilesLog.warn(
+            "refused to mirror OAuth credential: identity mismatch or regression",
+            {
+              profileId: params.profileId,
+            },
+          );
+        }
+        if (decision.reason === "incoming-not-fresher" && existing?.type === "oauth") {
+          acceptAuthoritative(existing);
+        }
+        return false;
+      }
+      if (existing?.type === "oauth" && !acceptAuthoritative(existing)) {
+        return false;
+      }
+      store.profiles[params.profileId] = { ...params.candidate };
+      validatedAuthoritative = true;
+      return true;
+    },
+  });
+  if (updated === null) {
+    throw new Error("Failed to read authoritative shared OAuth credential");
+  }
+  if (!validatedAuthoritative) {
+    return undefined;
+  }
+  const authoritative = updated.profiles[params.profileId];
+  return authoritative?.type === "oauth" ? authoritative : undefined;
 }
 
 export async function loadStoredOAuthRefreshStore(

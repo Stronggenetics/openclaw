@@ -1,6 +1,7 @@
 /** MCP OAuth credential provider, flow coordinator, and login helpers. */
 import { auth, type FetchLike } from "@modelcontextprotocol/client";
 import { normalizeOptionalString } from "@openclaw/normalization-core/string-coerce";
+import { racePromiseWithAbortSignal } from "../../packages/retry/src/index.js";
 import {
   type OpenClawStateAsyncLeaseContext,
   withOpenClawStateLeaseAsync,
@@ -15,6 +16,7 @@ import {
   type McpOAuthLoginLifecycle,
   withMcpOAuthLeaseSignal,
 } from "./mcp-oauth-provider.js";
+import { createMcpOAuthRefreshBoundary } from "./mcp-oauth-refresh-boundary.js";
 import {
   projectMcpOAuthCredentialsStatus,
   type McpOAuthPrincipalStatus,
@@ -102,122 +104,110 @@ export async function resolveMcpOAuthAccessToken(
   params: ResolveMcpOAuthAccessTokenParams,
 ): Promise<string | undefined> {
   const storeKey = params.identity.storeKey;
-  return await withMcpOAuthLease(
-    storeKey,
-    async (lease, context) => {
-      const store = await readMcpOAuthStore(storeKey, context);
-      await lease.assertOwned();
-      const tokens = store.tokens;
-      const rejectedCurrentToken = params.rejectedAccessToken === tokens?.access_token;
-      const challengeAppliesToCurrentState = !tokens?.access_token || rejectedCurrentToken;
-      if (params.authorizationChallenge === true && challengeAppliesToCurrentState) {
-        const resourceMetadataUrl = params.resourceMetadataUrl?.toString();
-        const scope = normalizeOptionalString(params.scope);
-        if (resourceMetadataUrl || scope || params.interactiveAuthorizationRequired === true) {
-          await mutateMcpOAuthStore(
-            { storeKey, lease, context },
-            {
-              kind: "authorizationChallenge",
-              resourceMetadataUrl,
-              scope,
-              ...(params.interactiveAuthorizationRequired === true
-                ? { requiresAuthorization: true }
-                : {}),
-            },
-          );
-        }
-      }
-      if (
-        params.authorizationChallenge === true &&
-        params.interactiveAuthorizationRequired === true &&
-        challengeAppliesToCurrentState
-      ) {
-        throw mcpOAuthAdditionalAuthorizationError(params.identity.serverName);
-      }
-      if (store.pendingAuthorizationChallenge?.requiresAuthorization === true) {
-        throw mcpOAuthAdditionalAuthorizationError(params.identity.serverName);
-      }
-      if (!tokens?.access_token) {
-        if (params.allowMissingToken === true) {
-          return undefined;
-        }
-        throw new Error(
-          `MCP server "${params.identity.serverName}" requires OAuth authorization. Run openclaw mcp login ${params.identity.serverName}.`,
-        );
-      }
-
-      const tokenIsFresh =
-        store.tokenExpiresAt !== undefined &&
-        store.tokenExpiresAt > Date.now() + TOKEN_EXPIRY_SKEW_MS;
-      if (
-        !rejectedCurrentToken &&
-        (tokenIsFresh ||
-          (store.tokenExpiresAt === undefined &&
-            (params.acceptUnknownExpiry === true || !tokens.refresh_token)))
-      ) {
-        return tokens.access_token;
-      }
-      if (!tokens.refresh_token) {
-        throw new Error(
-          `MCP server "${params.identity.serverName}" has expired OAuth credentials. Run openclaw mcp login ${params.identity.serverName}.`,
-        );
-      }
-
-      const pendingChallenge = store.pendingAuthorizationChallenge;
-      await mutateMcpOAuthStore({ storeKey, lease, context }, { kind: "bindTokensIssuer" });
-      const provider = await createMcpOAuthClientProvider({
-        identity: params.identity,
-        config: params.config,
-        lease,
-        storeContext: context,
-      });
-      const fetchFn =
-        params.fetchFn ?? buildMcpOAuthHttpFetch({ resourceUrl: params.identity.serverUrl });
-      const leasedFetchFn = withMcpOAuthLeaseSignal(fetchFn, lease.signal);
-      let latestFetchFailure: { error: unknown } | undefined;
-      let result: Awaited<ReturnType<typeof auth>>;
-      try {
-        result = await auth(provider, {
-          serverUrl: params.identity.serverUrl,
-          resourceMetadataUrl:
-            params.resourceMetadataUrl ??
-            (pendingChallenge?.resourceMetadataUrl
-              ? new URL(pendingChallenge.resourceMetadataUrl)
-              : undefined),
-          scope:
-            params.scope ??
-            normalizeOptionalString(pendingChallenge?.scope) ??
-            normalizeOptionalString(params.config?.scope),
-          fetchFn: async (url, init) => {
-            try {
-              const response = await leasedFetchFn(url, init);
-              latestFetchFailure = undefined;
-              return response;
-            } catch (error) {
-              latestFetchFailure = { error };
-              throw error;
-            }
+  params.signal?.throwIfAborted();
+  const work = withMcpOAuthLease(storeKey, async (lease, context) => {
+    const store = await readMcpOAuthStore(storeKey, context);
+    await lease.assertOwned();
+    const tokens = store.tokens;
+    const rejectedCurrentToken = params.rejectedAccessToken === tokens?.access_token;
+    const challengeAppliesToCurrentState = !tokens?.access_token || rejectedCurrentToken;
+    if (params.authorizationChallenge === true && challengeAppliesToCurrentState) {
+      const resourceMetadataUrl = params.resourceMetadataUrl?.toString();
+      const scope = normalizeOptionalString(params.scope);
+      if (resourceMetadataUrl || scope || params.interactiveAuthorizationRequired === true) {
+        await mutateMcpOAuthStore(
+          { storeKey, lease, context },
+          {
+            kind: "authorizationChallenge",
+            resourceMetadataUrl,
+            scope,
+            ...(params.interactiveAuthorizationRequired === true
+              ? { requiresAuthorization: true }
+              : {}),
           },
-        });
-      } catch (error) {
-        // SDK 1.30.0 converts refresh transport failures into an authorization fallback.
-        // Preserve the actionable failure when no later request recovered from it.
-        throw latestFetchFailure ? latestFetchFailure.error : error;
-      }
-      if (latestFetchFailure) {
-        throw latestFetchFailure.error;
-      }
-      await lease.assertOwned();
-      const refreshedTokens = await provider.tokens();
-      if (result !== "AUTHORIZED" || !refreshedTokens?.access_token) {
-        throw new Error(
-          `MCP server "${params.identity.serverName}" could not refresh OAuth credentials. Run openclaw mcp login ${params.identity.serverName}.`,
         );
       }
-      return refreshedTokens.access_token;
-    },
-    params.signal,
-  );
+    }
+    if (
+      params.authorizationChallenge === true &&
+      params.interactiveAuthorizationRequired === true &&
+      challengeAppliesToCurrentState
+    ) {
+      throw mcpOAuthAdditionalAuthorizationError(params.identity.serverName);
+    }
+    if (store.pendingAuthorizationChallenge?.requiresAuthorization === true) {
+      throw mcpOAuthAdditionalAuthorizationError(params.identity.serverName);
+    }
+    if (store.refreshClaim) {
+      throw new Error("MCP OAuth refresh outcome is uncertain; sign in again.");
+    }
+    if (!tokens?.access_token) {
+      if (params.allowMissingToken === true) {
+        return undefined;
+      }
+      throw new Error(
+        `MCP server "${params.identity.serverName}" requires OAuth authorization. Run openclaw mcp login ${params.identity.serverName}.`,
+      );
+    }
+
+    const tokenIsFresh =
+      store.tokenExpiresAt !== undefined &&
+      store.tokenExpiresAt > Date.now() + TOKEN_EXPIRY_SKEW_MS;
+    if (
+      !rejectedCurrentToken &&
+      (tokenIsFresh ||
+        (store.tokenExpiresAt === undefined &&
+          (params.acceptUnknownExpiry === true || !tokens.refresh_token)))
+    ) {
+      return tokens.access_token;
+    }
+    if (!tokens.refresh_token) {
+      throw new Error(
+        `MCP server "${params.identity.serverName}" has expired OAuth credentials. Run openclaw mcp login ${params.identity.serverName}.`,
+      );
+    }
+
+    const pendingChallenge = store.pendingAuthorizationChallenge;
+    await mutateMcpOAuthStore({ storeKey, lease, context }, { kind: "bindTokensIssuer" });
+    const boundary = createMcpOAuthRefreshBoundary({ storeKey, lease, context });
+    const provider = await createMcpOAuthClientProvider({
+      identity: params.identity,
+      config: params.config,
+      lease,
+      storeContext: context,
+      refreshBoundary: boundary,
+    });
+    const fetchFn =
+      params.fetchFn ?? buildMcpOAuthHttpFetch({ resourceUrl: params.identity.serverUrl });
+    let result: Awaited<ReturnType<typeof auth>>;
+    try {
+      result = await auth(provider, {
+        serverUrl: params.identity.serverUrl,
+        resourceMetadataUrl:
+          params.resourceMetadataUrl ??
+          (pendingChallenge?.resourceMetadataUrl
+            ? new URL(pendingChallenge.resourceMetadataUrl)
+            : undefined),
+        scope:
+          params.scope ??
+          normalizeOptionalString(pendingChallenge?.scope) ??
+          normalizeOptionalString(params.config?.scope),
+        fetchFn: boundary.wrap(withMcpOAuthLeaseSignal(fetchFn, lease.signal)),
+      });
+    } finally {
+      await boundary.finish();
+    }
+    await lease.assertOwned();
+    const refreshedTokens = await provider.tokens();
+    if (result !== "AUTHORIZED" || !refreshedTokens?.access_token) {
+      throw new Error(
+        `MCP server "${params.identity.serverName}" could not refresh OAuth credentials. Run openclaw mcp login ${params.identity.serverName}.`,
+      );
+    }
+    return refreshedTokens.access_token;
+  });
+  // A resource caller detaches; the admitted rotating exchange retains its lease through settlement.
+  return await racePromiseWithAbortSignal(work, params.signal);
 }
 
 /** Persist a terminal resource rejection without overwriting newer credentials. */
@@ -330,6 +320,10 @@ async function runMcpOAuthAuthorizationAttempt(
   context: OpenClawStateWorkerContext,
 ): Promise<"authorized" | "redirect"> {
   params.login?.assertCurrent();
+  const boundary = createMcpOAuthRefreshBoundary(
+    { storeKey: params.identity.storeKey, lease, context },
+    params.login?.assertCurrent,
+  );
   const provider = await createMcpOAuthClientProvider({
     identity: params.identity,
     config: params.config,
@@ -339,15 +333,23 @@ async function runMcpOAuthAuthorizationAttempt(
     lease,
     login: params.login,
     storeContext: context,
+    refreshBoundary: boundary,
   });
   params.login?.assertCurrent();
-  const result = await auth(provider, {
-    serverUrl: params.identity.serverUrl,
-    authorizationCode: normalizeOptionalString(params.authorizationCode),
-    resourceMetadataUrl: params.resourceMetadataUrl,
-    scope: normalizeOptionalString(params.scope) ?? normalizeOptionalString(params.config?.scope),
-    fetchFn: withMcpOAuthLeaseSignal(params.fetchFn, lease.signal, params.login?.assertCurrent),
-  });
+  let result: Awaited<ReturnType<typeof auth>>;
+  try {
+    result = await auth(provider, {
+      serverUrl: params.identity.serverUrl,
+      authorizationCode: normalizeOptionalString(params.authorizationCode),
+      resourceMetadataUrl: params.resourceMetadataUrl,
+      scope: normalizeOptionalString(params.scope) ?? normalizeOptionalString(params.config?.scope),
+      fetchFn: boundary.wrap(
+        withMcpOAuthLeaseSignal(params.fetchFn, lease.signal, params.login?.assertCurrent),
+      ),
+    });
+  } finally {
+    await boundary.finish();
+  }
   params.login?.assertCurrent();
   await lease.assertOwned();
   params.login?.assertCurrent();

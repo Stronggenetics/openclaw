@@ -1,6 +1,8 @@
 import { readResponseWithLimit } from "../../../infra/http-body.js";
 import { startOAuthLoopbackCallbackServer } from "../../../infra/oauth-loopback-callback.js";
 import {
+  createOAuthRefreshError,
+  createOAuthRefreshResponseError,
   generateOAuthState,
   generatePKCE,
   parseOAuthAuthorizationInput,
@@ -163,7 +165,19 @@ async function postJson(
   const buffer = await readResponseWithLimit(response, OAUTH_RESPONSE_MAX_BYTES, {
     onOverflow: ({ size }) => new Error(`Anthropic OAuth response too large: ${size} bytes`),
   });
-  const responseBody = new TextDecoder().decode(buffer);
+  const responseBody = new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+
+  if (body.grant_type === "refresh_token") {
+    let payload: unknown;
+    try {
+      payload = JSON.parse(responseBody);
+    } catch {
+      /* Invalid success is handled below. */
+    }
+    if (!response.ok || (payload && typeof payload === "object" && "error" in payload)) {
+      throw createOAuthRefreshResponseError("Anthropic token refresh", response.status, payload);
+    }
+  }
 
   if (!response.ok) {
     throw new Error(
@@ -308,16 +322,25 @@ async function refreshAnthropicToken(refreshToken: string): Promise<OAuthCredent
       refresh_token: refreshToken,
     });
   } catch (error) {
-    throw new Error(
-      `Anthropic token refresh request failed. url=${TOKEN_URL}; details=${formatErrorDetails(error)}`,
+    throw createOAuthRefreshError(
+      "Anthropic token refresh request failed. Sign in again.",
+      { version: 1, phase: "token-response", outcome: "unknown" },
       { cause: error },
     );
   }
 
-  return parseTokenCredentials(responseBody, {
-    invalidJsonMessage: "Anthropic token refresh returned invalid JSON.",
-    invalidFieldsMessage: "Anthropic token refresh returned invalid token fields.",
-  });
+  try {
+    return parseTokenCredentials(responseBody, {
+      invalidJsonMessage: "Anthropic token refresh returned invalid JSON.",
+      invalidFieldsMessage: "Anthropic token refresh returned invalid token fields.",
+    });
+  } catch (cause) {
+    throw createOAuthRefreshError(
+      "Anthropic token refresh returned invalid credentials. Sign in again.",
+      { version: 1, phase: "after-token-response", outcome: "unknown" },
+      { cause },
+    );
+  }
 }
 
 export const anthropicOAuthProvider: OAuthProviderInterface = {
