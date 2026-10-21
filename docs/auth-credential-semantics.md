@@ -218,10 +218,11 @@ provider-specific guarantee that the grant remains reusable, or an explicit
 owner-accepted provider retry policy. A missing response, connection reset,
 timeout after dispatch, or arbitrary 429/5xx response does not prove
 nonconsumption. xAI is the only owner-accepted retry policy: an HTTP 429 or 5xx
-token response without an OAuth `error` field keeps the stored sign-in and a
-later refresh retries it, which preserves xAI's prior refresh behavior. xAI
-structured OAuth errors, lost responses, timeouts and unreadable responses stay
-fenced. Unknown exceptions, unreadable
+token response keeps the stored sign-in and a later refresh retries it, which
+preserves xAI's prior refresh behavior. This includes transient or unrecognized
+OAuth `error` codes such as `temporarily_unavailable`. Final OAuth errors, such
+as `invalid_grant`, `invalid_client` or `invalid_request`, stay terminal at any
+status. Lost responses, timeouts and unreadable responses stay fenced. Unknown exceptions, unreadable
 successful responses, invalid returned credentials (including a missing
 `access_token`), and explicit token rejection remain terminal. A caller timeout does not roll back or
 retry an in-flight owner. Callers already queued for the same owner and exact

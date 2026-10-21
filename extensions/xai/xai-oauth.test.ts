@@ -218,8 +218,9 @@ describe("xAI OAuth", () => {
         }),
     ],
     [500, () => new Response(null, { status: 500 })],
+    [503, () => jsonResponse({ error: "temporarily_unavailable" }, 503)],
   ])(
-    "keeps the stored sign-in after a plain HTTP %s so a later refresh succeeds",
+    "keeps the stored sign-in after a transient HTTP %s so a later refresh succeeds",
     async (status, response) => {
       fetchImpl.mockResolvedValueOnce(response());
       const error = await refresh().catch((cause: unknown) => cause);
@@ -246,8 +247,9 @@ describe("xAI OAuth", () => {
   );
 
   it.each([
-    [503, { error: "temporarily_unavailable" }, "unknown"],
-    [429, { error: "rate_limited" }, "unknown"],
+    [429, { error: "invalid_grant" }, "rejected"],
+    [500, { error: "invalid_client" }, "rejected"],
+    [503, { error: "invalid_request" }, "unknown"],
     [401, { error: "invalid_grant" }, "rejected"],
     [200, { refresh_token: "possibly-consumed" }, "unknown"],
     [200, "invalid JSON", "unknown"],
@@ -315,7 +317,7 @@ describe("xAI OAuth", () => {
         },
       );
       await expect(refresh()).rejects.toMatchObject({
-        oauthRefreshOutcome: { status: 503, outcome: "unknown" },
+        oauthRefreshOutcome: { status: 503, outcome: "unchanged" },
       });
       expect(fetchImpl).toHaveBeenCalledOnce();
       expect(fixture.connections).toEqual(["http:auth.x.ai"]);

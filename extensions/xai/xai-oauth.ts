@@ -177,6 +177,9 @@ function formatXaiOAuthError(params: { context: string; status: number; body: un
   return error ? `${prefix}: ${error}${description ? ` (${description})` : ""}` : prefix;
 }
 
+// RFC 6749 final codes that the shared refresh-reason reader does not classify.
+const XAI_FINAL_OAUTH_ERRORS = new Set(["invalid_request", "access_denied"]);
+
 async function requestXaiOAuthRefresh(
   tokenEndpoint: string,
   refreshToken: string,
@@ -238,15 +241,18 @@ async function requestXaiOAuthRefresh(
       );
     }
     if (!response.ok || asOptionalRecord(body.json)?.error !== undefined) {
-      const structured = asOptionalRecord(body.json)?.error !== undefined;
-      // Jason's 2026-10-21 product decision for xAI (PR #178646): a plain 429/5xx
-      // keeps the stored sign-in for a later refresh. xAI does not document grant
-      // reuse, so structured OAuth errors and lost or unreadable responses stay fenced.
+      const oauthError = asOptionalRecord(body.json)?.error;
+      const code =
+        readStringValue(oauthError) ?? readStringValue(asOptionalRecord(oauthError)?.code);
+      // Jason's 2026-10-21 product decision for xAI (PR #178646): a 429/5xx keeps the
+      // stored sign-in for a later refresh unless its OAuth error is final. The shared
+      // helper already keeps refresh-specific terminal reasons rejected. xAI does not
+      // document grant reuse, so lost or unreadable responses stay fenced.
       const error = createOAuthRefreshResponseError(
         context,
         response.status,
         body.json,
-        structured ? undefined : "owner-accepted-provider-retry",
+        code && XAI_FINAL_OAUTH_ERRORS.has(code) ? undefined : "owner-accepted-provider-retry",
       );
       // An unverified HTML response remains an uncertain exchange, not permission to replay.
       if (
