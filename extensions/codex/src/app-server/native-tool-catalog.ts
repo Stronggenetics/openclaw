@@ -44,7 +44,7 @@ export async function loadCodexAttemptNativeToolCatalog(
     ephemeral?: boolean;
     signal: AbortSignal;
     acquireClient: () => Promise<CodexAppServerClient>;
-    releaseClient: (client: CodexAppServerClient) => void;
+    releaseClient: (client: CodexAppServerClient) => void | Promise<void>;
   },
 ): Promise<CodexDynamicToolSpec[] | undefined> {
   const { binding } = params;
@@ -58,7 +58,7 @@ export async function loadCodexAttemptNativeToolCatalog(
     try {
       return await loadCodexNativeToolCatalog({ ...params, binding, client });
     } finally {
-      params.releaseClient(client);
+      await params.releaseClient(client);
     }
   }
   // Managed ephemeral threads have no rollout. Their retained live owner already

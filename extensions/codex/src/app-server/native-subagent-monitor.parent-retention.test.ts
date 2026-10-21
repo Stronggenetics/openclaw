@@ -50,7 +50,7 @@ it.each([false, true])("preserves results after parent release (%s)", async (rec
     releaseCodexBoundLiveThread({
       client: client.client,
       threadId: "parent-thread",
-      lifecycleTiming: createCodexThreadLifecycleTimingTracker(),
+      lifecycleTiming: createCodexThreadLifecycleTimingTracker(false),
     });
 
   await client.notify(

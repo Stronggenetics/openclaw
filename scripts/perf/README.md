@@ -1,5 +1,39 @@
 # Team-shaped synthetic state
 
+## Workboard dashboard reads
+
+`workboard-read-measure.ts` exercises the real source Gateway and Workboard SQLite
+owner over signed synthetic WebSocket connections. Run it on an approved benchmark
+host. Prepare each fixture outside the measurement CPU allocation:
+
+```sh
+node --import ./scripts/tsx.mjs scripts/perf/workboard-read-measure.ts \
+  --root /path/to/new-fixture --port 41510 --prepare --boards 24 --cards 50
+node --import ./scripts/tsx.mjs scripts/perf/workboard-read-measure.ts \
+  --root /path/to/new-fixture --port 41510 --clients 12 --waves 80 \
+  --interval-ms 250 --start-at <future-epoch-ms> --output /path/to/result.json
+```
+
+Preparation creates 1,200 synthetic cards through public RPCs; their example PR
+URLs cause no GitHub requests. Measurements warm all board pages, then replay
+concurrent `workboard.boards.list` and `workboard.cards.list` calls, first without
+writes and then after one card status change per wave. Every response verifies
+card counts, board status aggregates, and changed card status. Reuse an untouched
+prepared fixture for each sample; measured status writes remain in its state.
+
+Reports include calls, errors, round-trip and handler p50/p99, response JSON bytes,
+Gateway process CPU, worker request classes, and observed board aggregate/metadata
+read commands on the existing worker transport. Handler seconds per 15 minutes
+are extrapolated from this replay's request rate, not a production forecast.
+Diagnostic loss, missing handler observations, stale data, and missed scheduled
+phase starts fail the run. This measures server RPCs, not browser rendering.
+
+For A/B comparisons use separate identical fixtures, ports, and source checkouts.
+Hold the host's exclusive measurement lock around each concurrent pair, use the
+same `--start-at` on both sides, and swap CPU halves for the next pair. Both warm
+and mutation phases have independent shared start times. Compare paired
+differences across at least two pairs; record outside load for context.
+
 ## Usage metadata bursts
 
 `chat-metadata-burst-measure.ts` requests `sessions.usage` on a cold 5,000-session
@@ -99,6 +133,44 @@ measurement lock, pin each side to its assigned 16-core half, swap the halves on
 the next pair, and compare each pair's candidate-minus-baseline difference.
 Build and seed outside the measurement CPU allocation. Keep every root and
 temporary directory inside the task-owned sandbox and remove them after use.
+
+## Startup with interrupted subagent runs
+
+The `interruptedRegistry` case starts a real Gateway against 86 retained runs:
+78 completed rows and eight unfinished rows across eight synthetic child agents.
+Four unfinished rows remain `running`, and four are already `interrupted` with
+aborted session state. All rows retain completion expectations and requester-turn
+claims, including the delivered, cleanup-complete rows: all 86 are activation
+obligations, not cold history. They share eight requester cohorts; the unfinished
+rows share two of those cohorts, four per requester. The seed command
+commits the fixture in a child writer, then sends that writer `SIGKILL` while its
+SQLite handles remain open. This preserves actual unclean-close/WAL residue;
+the run/session records are synthetic, not captured from a predecessor Gateway
+or model execution. No models, credentials, or external channels are used.
+
+```sh
+node --import ./scripts/tsx.mjs scripts/bench-gateway-startup.ts \
+  --case interruptedRegistry --fixture-root /path/to/new-fixture --seed-only
+node --import ./scripts/tsx.mjs scripts/bench-gateway-startup.ts \
+  --case interruptedRegistry --fixture-root /path/to/new-fixture \
+  --runs 1 --warmup 0 --timeout-ms 90000 --output /path/to/result.json
+```
+
+The output includes spawn-to-`/readyz`, spawn-to-Gateway-ready, all activation
+trace spans, per-run recovery times, and database bytes. The driver waits for all
+eight recovery events and verifies exactly one event per unfinished run, eight
+durable terminal error outcomes, all 86 retained rows, and unchanged execution
+outcomes for the 78 completed rows after shutdown. Requester claim metadata may
+change during settlement. The synthetic rows have no saved operator source, so
+this proves orphan and missing-source settlement; it does not exercise successful
+operator authority restoration, resuming a model, or external delivery.
+Activation subspans can overlap or sum concurrent groups, so compare the outer
+activation elapsed time separately from the component totals.
+
+Prepare fresh roots sequentially for each side of every pair; recovery mutates
+the fixture. Use the same `--start-at <epoch-ms>` for concurrent A/B starts under
+the benchmark host's exclusive measurement lock, and swap the assigned CPU
+halves for the next pair. Build and seed outside the measurement allocation.
 
 ## Startup with one checking agent
 
@@ -832,6 +904,13 @@ as the Gateway and uses V8's count-only object query; it retains no instance
 references. Bundled entries are rejected because their constructor identity
 differs. Counts cover the main isolate only, and the queries force additional
 collections, so omit the census from latency/GC acceptance runs.
+Add `--entry src/entry.ts --fingerprint-retention` to attribute retained prompt-cache
+diagnostics after the measured reopen. It waits one more idle interval, collects
+garbage, verifies that no session runtime objects remain reachable, then reports heap, external,
+and array-buffer deltas after clearing the diagnostic owner. This preserves the
+diagnostic baseline throughout the measured reopen and keeps attribution's extra
+collections outside latency and GC windows. External memory includes array buffers;
+do not add those two deltas together.
 Add `--heap-snapshot` in a separate diagnostic pass for `initial.heapsnapshot`,
 `post-work.heapsnapshot`, `post-idle.heapsnapshot`, and `post-reopen.heapsnapshot`
 to count retained managers, sessions, agents, and their transcript retainers.
@@ -850,6 +929,52 @@ node --import ./scripts/tsx.mjs scripts/perf/transcript-broadcast-measure.ts \
   --memory-interval-ms 60000 --retained-profile-ms 600000 \
   --reset-every-rounds 20 --list-interval-ms 2000 --heap-snapshot
 ```
+
+To retain long active histories during a memory soak, seed with
+`--scenario memory-soak --runs 8 --history-turns 512 --history-last-turns 2500
+--history-payload-kib 16 --reset-every-rounds 0 --seed-history`, then run with
+the same options without `--seed-history`. The last session contains the larger
+turn count. Each seeded turn has a separate deterministic synthetic reasoning
+signature and tool result of the requested KiB each; the default zero preserves
+the smaller reopen fixture. In this mode, `--mixed-rpc` history polls select the
+active seeded sessions, including the larger last session. Keep fixture writes sequential and record actual
+database bytes before choosing the shape on a shared filesystem.
+
+Add `--worker-memory` in a separate diagnostic pass to record bounded task-kind
+memory under `transcript-worker-<thread>.jsonl`. The private preload observes
+the real transcript worker's task transport and samples after JSON parses of at
+least 1 KiB, capturing the raw-row plus decoded-object high water. It records
+task-start/end heap, peak observed heap, parsed bytes, heap limit, and the count
+and final old-generation bytes of major collections during each task. Tasks with
+no major collection keep that value absent. Periodic samples separately label
+the last observed post-GC baseline. It does not force GC, retain payloads,
+or change production worker limits. These are sampled lower bounds, not an exact
+allocation total; per-parse sampling adds overhead, so compare equally instrumented
+pairs and keep uninstrumented RPC acceptance timing separate.
+
+For a focused cold-process bounded-hydration diagnostic on that same fixture:
+
+```sh
+node --import ./scripts/tsx.mjs scripts/perf/transcript-hydration-headroom.ts \
+  --state-dir /path/to/seeded-fixture --output /path/to/hydration-result \
+  --revision <measured-commit-sha> --max-mib 64 --rounds 4
+```
+
+This uses the normal hydration owner and actual transcript task worker, checks
+that repeated reads return identical results, and leaves a three-second idle
+observation after the task burst. It does not establish Gateway throughput.
+Use separate matching fixtures, a shared `--start-at`, the measurement lock,
+and swapped CPU halves for baseline/candidate pairs. Follow it with the actual
+Gateway swarm and history/list latency comparison.
+
+For a comparison in one source checkout, `--baseline-owners` substitutes sibling
+`.baseline.ts` copies of `session-transcript.worker`,
+`session-accessor.sqlite-history-query`, `session-memory-entry.worker`, and
+`session-accessor.sqlite-active-context` under `src/config/sessions`. Create those
+four copies from the recorded baseline commit before applying the candidate;
+they are temporary sandbox artifacts. Both sides otherwise use the same import
+graph, dependencies, and driver. Omit `--worker-memory` for the uninstrumented
+Gateway latency pairs; the baseline loader still selects the pinned owners.
 
 This runs paced cohorts after five minutes of warmup, with one real `read` tool
 and a streamed completion per turn, including the same synthetic reasoning
