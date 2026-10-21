@@ -20,7 +20,6 @@ export type XOAuthOptions = {
   clientSecret: string;
   refreshToken: string;
   fetch?: XFetch;
-  signal?: AbortSignal;
   loadRefreshToken?: () => Promise<string | undefined>;
   saveRefreshToken?: (token: string) => Promise<void>;
   claimRefreshToken?: () => Promise<XRefreshClaim>;
@@ -38,10 +37,7 @@ function unknownFailure() {
 }
 
 async function exchange(options: XOAuthOptions, refreshToken: string) {
-  const signal = AbortSignal.any([
-    ...[options.signal].filter((value): value is AbortSignal => Boolean(value)),
-    AbortSignal.timeout(30_000),
-  ]);
+  const signal = AbortSignal.timeout(30_000);
   let dispatched = false;
   let response: Response;
   try {
