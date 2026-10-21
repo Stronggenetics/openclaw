@@ -344,7 +344,7 @@ it.each(["claimed", "protected"] as const)(
       const error = await releaseCodexBoundLiveThread({
         client: harness.client,
         threadId,
-        lifecycleTiming: createCodexThreadLifecycleTimingTracker(),
+        lifecycleTiming: createCodexThreadLifecycleTimingTracker(false),
         signal: abort.signal,
       }).catch((cause: unknown) => cause);
       // Foreground startup has no spawnedBy exemption. A refusal before any
