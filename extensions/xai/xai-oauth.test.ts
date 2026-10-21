@@ -171,6 +171,42 @@ describe("xAI OAuth", () => {
     vi.restoreAllMocks();
   });
 
+  it("retries only verified Cloudflare challenge headers without reading the challenge body", async () => {
+    const cancelled = vi.fn();
+    const challenge = () =>
+      new Response(
+        new ReadableStream<Uint8Array>({
+          start(controller) {
+            controller.enqueue(Uint8Array.of(0x80));
+            controller.close();
+          },
+          cancel: cancelled,
+        }),
+        {
+          status: 403,
+          headers: { "cf-mitigated": "challenge" },
+        },
+      );
+    mockResponses(
+      challenge(),
+      challenge(),
+      jsonResponse({ access_token: "recovered", expires_in: 3600 }),
+    );
+    await expect(refresh()).resolves.toMatchObject({ access: "recovered", refresh: "refresh-1" });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(cancelled).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds repeated verified challenges and leaves the unconsumed grant recoverable", async () => {
+    fetchImpl.mockImplementation(
+      async () => new Response(null, { status: 403, headers: { "cf-mitigated": "challenge" } }),
+    );
+    const error = await refresh().catch((cause: unknown) => cause);
+    expect(error).toMatchObject({ oauthRefreshOutcome: { outcome: "unchanged", status: 403 } });
+    expect(isRecoverableOAuthRefreshFailure(error)).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+  });
+
   it.each([
     [503, { error: "temporarily_unavailable" }, "unknown"],
     [429, { error: "rate_limited" }, "unknown"],
@@ -390,7 +426,7 @@ describe("xAI OAuth", () => {
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
-  it("reports an intermediary challenge without replaying a possibly consumed grant", async () => {
+  it("retries a verified intermediary challenge but never infers nonconsumption from HTML alone", async () => {
     mockResponses(
       new Response("<!DOCTYPE html><html><body>Attention Required! Cloudflare</body></html>", {
         status: 403,
@@ -408,7 +444,7 @@ describe("xAI OAuth", () => {
       oauthRefreshOutcome: { outcome: "unknown", status: 403 },
     });
     expect(isRecoverableOAuthRefreshFailure(error)).toBe(false);
-    expect(fetchImpl).toHaveBeenCalledOnce();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
   });
 
   it("preserves the cached xAI expiry when token lifetimes overflow safe milliseconds", async () => {

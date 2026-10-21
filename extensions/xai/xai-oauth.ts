@@ -183,73 +183,96 @@ async function requestXaiOAuthRefresh(
 ): Promise<XaiOAuthTokenResponse> {
   const endpoint = requireTrustedXaiOAuthEndpoint(tokenEndpoint, "token endpoint");
   const context = "xAI OAuth refresh";
-  let result: Awaited<ReturnType<typeof fetchXaiOAuth>>;
-  try {
-    result = await fetchXaiOAuth(
-      endpoint,
-      {},
-      {
-        grant_type: "refresh_token",
-        client_id: XAI_OAUTH_CLIENT_ID,
-        refresh_token: refreshToken,
-      },
-    );
-  } catch (cause) {
-    // No headers does not mean the server did not consume a rotating grant.
-    throw createOAuthRefreshError(
-      context + " transport failed",
-      {
-        version: 1,
-        phase: "token-response",
-        outcome: "unknown",
-      },
-      { cause },
-    );
-  }
-  const { response } = result;
-  let body: Awaited<ReturnType<typeof readResponseBody>>;
-  try {
-    body = await readResponseBody(result, { fatalUtf8: true });
-  } catch (cause) {
-    throw createOAuthRefreshError(
-      context + " response could not be read",
-      {
-        version: 1,
-        phase: "token-response",
-        outcome: "unknown",
-        status: response.status,
-      },
-      { cause },
-    );
-  }
-  if (!response.ok || asOptionalRecord(body.json)?.error !== undefined) {
-    const error = createOAuthRefreshResponseError(context, response.status, body.json);
-    // Keep actionable challenge diagnostics without inferring nonconsumption or replaying.
-    if (
-      !asOptionalRecord(body.json)?.error &&
-      (response.headers.get("cf-mitigated") === "challenge" ||
-        /text\/html/i.test(response.headers.get("content-type") ?? "") ||
-        /<!doctype html|<html\b/i.test(body.text))
-    ) {
-      error.message +=
-        ": xAI returned an HTML/Cloudflare challenge instead of OAuth JSON. Re-run xAI OAuth login if it persists.";
+  const maxChallengeAttempts = 3;
+  for (let attempt = 1; attempt <= maxChallengeAttempts; attempt++) {
+    let result: Awaited<ReturnType<typeof fetchXaiOAuth>>;
+    try {
+      result = await fetchXaiOAuth(
+        endpoint,
+        {},
+        {
+          grant_type: "refresh_token",
+          client_id: XAI_OAUTH_CLIENT_ID,
+          refresh_token: refreshToken,
+        },
+      );
+    } catch (cause) {
+      // No headers does not mean the server did not consume a rotating grant.
+      throw createOAuthRefreshError(
+        context + " transport failed",
+        {
+          version: 1,
+          phase: "token-response",
+          outcome: "unknown",
+        },
+        { cause },
+      );
     }
-    throw error;
+    const { response } = result;
+    // Cloudflare documents this header as an intermediary response replacing the origin response.
+    // HTML alone is not nonconsumption evidence, and must never replay a rotating grant.
+    if (response.status === 403 && response.headers.get("cf-mitigated") === "challenge") {
+      try {
+        await response.body?.cancel();
+      } finally {
+        await result.release();
+      }
+      if (attempt < maxChallengeAttempts) {
+        await sleepWithAbort(250);
+      }
+      continue;
+    }
+    let body: Awaited<ReturnType<typeof readResponseBody>>;
+    try {
+      body = await readResponseBody(result, { fatalUtf8: true });
+    } catch (cause) {
+      throw createOAuthRefreshError(
+        context + " response could not be read",
+        {
+          version: 1,
+          phase: "token-response",
+          outcome: "unknown",
+          status: response.status,
+        },
+        { cause },
+      );
+    }
+    if (!response.ok || asOptionalRecord(body.json)?.error !== undefined) {
+      const error = createOAuthRefreshResponseError(context, response.status, body.json);
+      // An unverified HTML response remains an uncertain exchange, not permission to replay.
+      if (
+        !asOptionalRecord(body.json)?.error &&
+        (response.headers.get("cf-mitigated") === "challenge" ||
+          /text\/html/i.test(response.headers.get("content-type") ?? "") ||
+          /<!doctype html|<html\b/i.test(body.text))
+      ) {
+        error.message +=
+          ": xAI returned an HTML/Cloudflare challenge instead of OAuth JSON. Re-run xAI OAuth login if it persists.";
+      }
+      throw error;
+    }
+    try {
+      return parseXaiOAuthTokenResponse(body.json);
+    } catch (cause) {
+      throw createOAuthRefreshError(
+        context + " returned invalid credentials",
+        {
+          version: 1,
+          phase: "after-token-response",
+          outcome: "unknown",
+          status: response.status,
+        },
+        { cause },
+      );
+    }
   }
-  try {
-    return parseXaiOAuthTokenResponse(body.json);
-  } catch (cause) {
-    throw createOAuthRefreshError(
-      context + " returned invalid credentials",
-      {
-        version: 1,
-        phase: "after-token-response",
-        outcome: "unknown",
-        status: response.status,
-      },
-      { cause },
-    );
-  }
+  throw createOAuthRefreshError(context + " blocked by a Cloudflare challenge; retry later", {
+    version: 1,
+    phase: "token-response",
+    outcome: "unchanged",
+    status: 403,
+    recovery: { kind: "later", evidence: "verified-intermediary-challenge" },
+  });
 }
 
 function resolveNextXaiDeviceCodePollDelayMs(intervalMs: number, deadlineMs: number): number {

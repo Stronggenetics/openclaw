@@ -85,17 +85,11 @@ it("coalesces the real form/parser and distinguishes clients even with the same 
     await Promise.allSettled([first]);
   }
 });
-it.each(["lost-response", "503", "nested-rejection", "unexpected-rotation"])(
-  "fences %s across cache reset without rewriting externally owned ADC",
+it.each(["nested-rejection", "unexpected-rotation"])(
+  "rejects %s without caching success or rewriting externally owned ADC",
   async (mode) => {
     const original = readFileSync(adcPath, "utf8");
     const network = vi.fn<typeof fetch>(async () => {
-      if (mode === "lost-response") {
-        throw new TypeError("synthetic consumed response lost");
-      }
-      if (mode === "503") {
-        return Response.json({ error: "temporarily_unavailable" }, { status: 503 });
-      }
       if (mode === "nested-rejection") {
         return Response.json({
           access_token: "synthetic-access",
@@ -112,10 +106,34 @@ it.each(["lost-response", "503", "nested-rejection", "unexpected-rotation"])(
     resetGoogleVertexAdcState();
     await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
-    await expect(resolveGoogleVertexAuthorizedUserHeaders(network)).rejects.toThrow(
-      /uncertain|reauthoriz/i,
-    );
-    expect(network).toHaveBeenCalledOnce();
+    await expect(resolveGoogleVertexAuthorizedUserHeaders(network)).rejects.toThrow();
+    expect(network).toHaveBeenCalledTimes(2);
+    expect(readFileSync(adcPath, "utf8")).toBe(original);
+  },
+);
+it.each(["lost-response", "503"])(
+  "reuses the documented reusable ADC grant after %s and a process cache reset",
+  async (mode) => {
+    const original = readFileSync(adcPath, "utf8");
+    const network = vi.fn<typeof fetch>(async (_url, init) => {
+      const form = new URLSearchParams(await new Response(init?.body).text());
+      expect(form.get("refresh_token")).toBe(initial.refresh_token);
+      if (network.mock.calls.length === 1) {
+        if (mode === "lost-response") {
+          throw new TypeError("synthetic response lost");
+        }
+        return Response.json({ error: "temporarily_unavailable" }, { status: 503 });
+      }
+      return success();
+    });
+    await expect(resolveGoogleVertexAuthorizedUserHeaders(network)).rejects.toThrow();
+    resetGoogleVertexAdcState();
+    await closeOpenClawStateDatabaseAsync();
+    resetPluginStateStoreForTests();
+    await expect(resolveGoogleVertexAuthorizedUserHeaders(network)).resolves.toEqual({
+      Authorization: "Bearer synthetic-access",
+    });
+    expect(network).toHaveBeenCalledTimes(2);
     expect(readFileSync(adcPath, "utf8")).toBe(original);
   },
 );

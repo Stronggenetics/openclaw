@@ -319,7 +319,8 @@ conditionally before access is published. Caller cancellation ends observation,
 not an already-dispatched owner's settlement.
 
 Vertex `authorized_user` ADC remains read-only external input. Its selected file
-and client/grant identity scope the access cache and pending refresh claim. An
+and client/grant identity scope the access cache and in-process refresh coalescing.
+OpenClaw does not persist a claim against that externally owned grant. An
 unexpected replacement refresh token is an actionable unsupported-rotation
 error, never silently discarded or written back to gcloud's file. Other ADC
 kinds continue through GoogleAuth. One-shot Meet grants likewise cannot silently
@@ -333,6 +334,32 @@ refresh grants. Gemini CLI dispatch is tool-owned; historical Gemini profiles
 lack a native OpenClaw refresh adapter with verified original client provenance.
 That native route remains explicitly unsupported rather than borrowing a
 different Google client or taking over a CLI home.
+
+### Recovering an interrupted rotating refresh
+
+A pending rotating-grant claim left by a crash is not automatically released
+after a timeout. The provider may already have consumed it; restarting or
+deleting a database marker is not evidence that the old grant is safe to retry.
+When an uncertain-outcome error asks for sign-in, obtain a new grant through the
+existing credential owner:
+
+- System or agent model profiles: run `openclaw models auth login --provider <id>`
+  for the affected agent/profile. Personal model accounts reconnect from
+  **Settings → Profile → Connected accounts**, not the system auth store.
+- Shared MCP OAuth: run `openclaw mcp logout <name>`, then
+  `openclaw mcp login <name>`. Per-requester MCP users use their own sign-in flow.
+- GitHub accounts: reconnect the affected shared or personal connection through
+  its existing account setup, preserving the intended account identity.
+- Twitch: reauthorize the configured bot account and replace its configured
+  access/refresh grant together. Do not clear plugin state to replay the old
+  refresh token. A saved completed rotation retries only identity validation;
+  it does not repeat the token exchange.
+
+Google Meet and Microsoft delegated grants retain their documented reusable
+refresh material for later recovery, but explicit rejection still requires
+reauthorization. Vertex ADC remains under its external credential owner. No
+recovery procedure should copy a different person’s grant or edit live SQLite
+rows manually.
 
 ## Personal model accounts
 

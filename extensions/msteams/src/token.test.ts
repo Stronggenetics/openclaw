@@ -434,6 +434,7 @@ describe("resolveDelegatedAccessToken", () => {
           throw new Error("expected real delegated claim");
         }
         return {
+          ...claim,
           async settle(tokens) {
             writing.resolve();
             await releaseWrite.promise;
@@ -463,8 +464,19 @@ describe("resolveDelegatedAccessToken", () => {
     await closeOpenClawStateDatabaseAsync();
     resetPluginStateStoreForTests();
     expect((await delegatedState.loadMSTeamsDelegatedTokens())?.accessToken).toBe(
-      failWrite ? undefined : refreshed.accessToken,
+      failWrite ? delegatedTokens.accessToken : refreshed.accessToken,
     );
+    if (failWrite) {
+      // Microsoft keeps the old grant reusable; publication failure must not strand it.
+      oauthTokenMocks.refreshMSTeamsDelegatedTokens.mockResolvedValueOnce(refreshed);
+      expect(await resolveDelegatedAccessToken(tokenParams)).toBe(refreshed.accessToken);
+      expect(oauthTokenMocks.refreshMSTeamsDelegatedTokens).toHaveBeenLastCalledWith(
+        expect.objectContaining({ refreshToken: delegatedTokens.refreshToken }),
+      );
+      expect((await delegatedState.loadMSTeamsDelegatedTokens())?.accessToken).toBe(
+        refreshed.accessToken,
+      );
+    }
   });
 
   it("propagates a delegated token read failure without attempting refresh", async () => {

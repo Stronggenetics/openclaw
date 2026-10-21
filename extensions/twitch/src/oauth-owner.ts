@@ -1,6 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { callTwitchApiRaw } from "@twurple/api-call";
 import {
   accessTokenIsExpired,
   getTokenInfo,
@@ -16,22 +15,16 @@ import {
   isRecoverableOAuthRefreshFailure,
   readOAuthRefreshErrorReason,
 } from "openclaw/plugin-sdk/provider-oauth-runtime";
+import { fetchWithSsrFGuard } from "openclaw/plugin-sdk/ssrf-runtime";
 import { getAccountConfig } from "./config.js";
 import { getTwitchRuntime } from "./runtime.js";
 import { resolveTwitchToken } from "./token.js";
 import type { TwitchAccountConfig } from "./types.js";
 import { normalizeToken } from "./utils/twitch.js";
 
-// Twurple documents this merge seam for the host's native fetch options.
-declare module "@twurple/api-call" {
-  interface TwitchApiCallFetchOptions {
-    signal?: AbortSignal;
-    redirect?: RequestRedirect;
-  }
-}
-
 type Grant = AccessToken & { userId?: string };
-type State = { lineage: string } & ({ token: Grant } | { claim: string });
+type Claim = { claim: string; completed?: AccessToken; expectedUserId?: string };
+type State = { lineage: string } & ({ token: Grant } | Claim);
 const tasks = new WeakMap<object, Map<string, Promise<Grant>>>();
 
 function lineageOf(account: TwitchAccountConfig, token: string): string {
@@ -50,78 +43,97 @@ function lineageOf(account: TwitchAccountConfig, token: string): string {
     .digest("hex");
 }
 
-async function exchange(account: TwitchAccountConfig, refreshToken: string): Promise<AccessToken> {
-  // Keep Twurple's public endpoint/query serializer, but inspect the raw response:
-  // its higher-level helper discards OAuth errors on HTTP 200 and quotes secret URLs.
-  let response: Response;
-  try {
-    response = await callTwitchApiRaw(
-      {
-        type: "auth",
-        url: "token",
-        method: "POST",
-        query: {
-          client_id: account.clientId,
-          client_secret: account.clientSecret!,
-          grant_type: "refresh_token",
-          refresh_token: refreshToken,
-        },
-      },
-      undefined,
-      undefined,
-      undefined,
-      { signal: AbortSignal.timeout(30_000), redirect: "error" },
+async function exchange(
+  account: TwitchAccountConfig,
+  refreshToken: string,
+  assertCurrent: () => void,
+): Promise<AccessToken> {
+  let dispatched = false;
+  const { response, release } = await fetchWithSsrFGuard({
+    url: "https://id.twitch.tv/oauth2/token",
+    policy: { allowedHostnames: ["id.twitch.tv"] },
+    requireHttps: true,
+    timeoutMs: 30_000,
+    auditContext: "twitch.oauth.refresh",
+    beforeRequest: () => {
+      assertCurrent();
+      dispatched = true;
+    },
+    init: {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded", Accept: "application/json" },
+      body: new URLSearchParams({
+        client_id: account.clientId!,
+        client_secret: account.clientSecret!,
+        grant_type: "refresh_token",
+        refresh_token: refreshToken,
+      }),
+    },
+  }).catch((cause: unknown) => {
+    throw createOAuthRefreshError(
+      "Twitch OAuth refresh transport failed",
+      dispatched
+        ? {
+            version: 1,
+            phase: "token-response",
+            outcome: "unknown",
+          }
+        : {
+            version: 1,
+            phase: "before-dispatch",
+            outcome: "not-attempted",
+            recovery: { kind: "later", evidence: "dispatch-not-started" },
+          },
+      { cause },
     );
-  } catch {
-    throw createOAuthRefreshError("Twitch OAuth refresh transport failed", {
-      version: 1,
-      phase: "token-response",
-      outcome: "unknown",
-    });
-  }
-  let payload: Record<string, unknown>;
+  });
   try {
-    payload = await readProviderJsonObjectResponse(response, "Twitch OAuth refresh", {
-      maxBytes: 256 * 1024,
-    });
-  } catch {
-    throw createOAuthRefreshError("Twitch OAuth refresh returned an unreadable response", {
-      version: 1,
-      phase: "after-token-response",
-      outcome: "unknown",
-      status: response.status,
-    });
+    let payload: Record<string, unknown>;
+    try {
+      payload = await readProviderJsonObjectResponse(response, "Twitch OAuth refresh", {
+        maxBytes: 256 * 1024,
+      });
+    } catch {
+      throw createOAuthRefreshError("Twitch OAuth refresh returned an unreadable response", {
+        version: 1,
+        phase: "after-token-response",
+        outcome: "unknown",
+        status: response.status,
+      });
+    }
+    if (!response.ok || readOAuthRefreshErrorReason(payload)) {
+      throw createOAuthRefreshResponseError("Twitch OAuth refresh", response.status, payload);
+    }
+    if (
+      typeof payload.access_token !== "string" ||
+      !payload.access_token.trim() ||
+      typeof payload.refresh_token !== "string" ||
+      !payload.refresh_token.trim() ||
+      typeof payload.expires_in !== "number" ||
+      !Number.isFinite(payload.expires_in) ||
+      payload.expires_in < 0 ||
+      !Array.isArray(payload.scope) ||
+      !payload.scope.every((scope): scope is string => typeof scope === "string") ||
+      typeof payload.token_type !== "string" ||
+      payload.token_type.toLowerCase() !== "bearer"
+    ) {
+      throw createOAuthRefreshError("Twitch OAuth refresh returned invalid tokens", {
+        version: 1,
+        phase: "after-token-response",
+        outcome: "unknown",
+        status: response.status,
+      });
+    }
+    return {
+      accessToken: payload.access_token,
+      refreshToken: payload.refresh_token,
+      expiresIn: payload.expires_in,
+      scope: payload.scope,
+      obtainmentTimestamp: Date.now(),
+    };
+  } finally {
+    await release();
   }
-  if (!response.ok || readOAuthRefreshErrorReason(payload)) {
-    throw createOAuthRefreshResponseError("Twitch OAuth refresh", response.status, payload);
-  }
-  if (
-    typeof payload.access_token !== "string" ||
-    !payload.access_token.trim() ||
-    typeof payload.refresh_token !== "string" ||
-    !payload.refresh_token.trim() ||
-    typeof payload.expires_in !== "number" ||
-    !Number.isFinite(payload.expires_in) ||
-    payload.expires_in < 0 ||
-    !Array.isArray(payload.scope) ||
-    !payload.scope.every((scope): scope is string => typeof scope === "string") ||
-    typeof payload.token_type !== "string" ||
-    payload.token_type.toLowerCase() !== "bearer"
-  ) {
-    throw createOAuthRefreshError("Twitch OAuth refresh returned invalid tokens", {
-      version: 1,
-      phase: "after-token-response",
-      outcome: "unknown",
-      status: response.status,
-    });
-  }
-  return {
-    accessToken: payload.access_token,
-    refreshToken: payload.refresh_token,
-    expiresIn: payload.expires_in,
-    scope: payload.scope,
-    obtainmentTimestamp: Date.now(),
-  };
 }
 
 /** One durable channel-account owner, including the initial and IRC-requested refresh. */
@@ -189,6 +201,50 @@ export async function createManagedTwitchAuthProvider(
         observed =
           initialized.status === "conflict" ? initialized.current : await store.observe("current");
       }
+      const validateCompleted = async (
+        claim: { lineage: string } & Claim & { completed: AccessToken },
+      ) => {
+        // A validation outage retries only this GET, never the already-completed token POST.
+        assertCurrent();
+        const info = await getTokenInfo(claim.completed.accessToken, clientId);
+        assertCurrent();
+        const current = await store.observe("current");
+        if (!isDeepStrictEqual(current.value, claim)) {
+          throw new Error("Twitch OAuth refresh owner changed before validation");
+        }
+        if (
+          !info.userId ||
+          info.userName?.toLowerCase() !== account.username.toLowerCase() ||
+          (claim.expectedUserId && info.userId !== claim.expectedUserId)
+        ) {
+          await store.compareAndApply("current", current.comparison, {
+            operation: "update",
+            action: "set",
+            value: { lineage, claim: claim.claim },
+          });
+          throw new Error(
+            "Twitch OAuth refresh returned a different account; reauthorize the configured grant",
+          );
+        }
+        const replacement = { ...claim.completed, userId: info.userId };
+        const result = await store.compareAndApply("current", current.comparison, {
+          operation: "update",
+          action: "set",
+          value: { lineage, token: replacement },
+        });
+        if (result.status !== "applied") {
+          throw new Error("Twitch OAuth refresh owner changed before settlement");
+        }
+        assertCurrent();
+        return replacement;
+      };
+      if (
+        observed.value?.lineage === lineage &&
+        "claim" in observed.value &&
+        observed.value.completed
+      ) {
+        return await validateCompleted({ ...observed.value, completed: observed.value.completed });
+      }
       assertCurrent();
       if (!observed.value || observed.value.lineage !== lineage || !("token" in observed.value)) {
         throw new Error(
@@ -229,25 +285,33 @@ export async function createManagedTwitchAuthProvider(
       assertCurrent();
       let refreshed: AccessToken;
       try {
-        refreshed = await exchange(account, original.refreshToken);
+        refreshed = await exchange(account, original.refreshToken, assertCurrent);
       } catch (error) {
         if (isRecoverableOAuthRefreshFailure(error)) {
           await settle(original);
         }
         throw error;
       }
-      const info = await getTokenInfo(refreshed.accessToken, clientId);
-      if (
-        !info.userId ||
-        info.userName?.toLowerCase() !== account.username.toLowerCase() ||
-        (original.userId && info.userId !== original.userId)
-      ) {
-        throw new Error("Twitch OAuth refresh returned a different account");
+      // Preserve the completed exchange before any fallible identity lookup. A crash or
+      // lost write reply can resume validation with the rotated grant, without replay.
+      const completed = {
+        ...claim,
+        completed: refreshed,
+        ...(original.userId ? { expectedUserId: original.userId } : {}),
+      };
+      const current = await store.observe("current");
+      if (!isDeepStrictEqual(current.value, claim)) {
+        throw new Error("Twitch OAuth refresh owner changed before completion");
       }
-      const replacement = { ...refreshed, userId: info.userId };
-      // Identity validation and storage are post-success: neither may restore old tokens.
-      await settle(replacement);
-      return replacement;
+      const saved = await store.compareAndApply("current", current.comparison, {
+        operation: "update",
+        action: "set",
+        value: completed,
+      });
+      if (saved.status !== "applied") {
+        throw new Error("Twitch OAuth refresh owner changed before completion");
+      }
+      return await validateCompleted(completed);
     })();
     active.set(key, task);
     try {

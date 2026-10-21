@@ -17,7 +17,10 @@ export type OAuthRefreshOutcome = {
       outcome: "unchanged";
       recovery: {
         kind: "later";
-        evidence: "documented-nonconsuming-rejection" | "documented-reusable-grant";
+        evidence:
+          | "documented-nonconsuming-rejection"
+          | "documented-reusable-grant"
+          | "verified-intermediary-challenge";
       };
     }
   | {
@@ -112,19 +115,28 @@ export function createOAuthRefreshError(
   });
 }
 
-/** A response, including 429/5xx, proves rejection or uncertainty, not nonconsumption. */
+/** Reuse evidence must come from the provider owner, never from status alone. */
 export function createOAuthRefreshResponseError(
   context: string,
   status: number,
   payload: unknown,
+  evidence?: "documented-reusable-grant",
 ): ReturnType<typeof createOAuthRefreshError> {
   const reason = readOAuthRefreshErrorReason(payload);
   const record = asOptionalRecord(payload);
+  const reusable =
+    evidence && (!reason || reason === "provider_error") && (status === 429 || status >= 500);
   return createOAuthRefreshError(`${context} failed (${status})${reason ? `: ${reason}` : ""}`, {
     version: 1,
     phase: "token-response",
-    outcome:
-      reason && reason !== "provider_error" && !record?.access_token ? "rejected" : "unknown",
+    ...(reusable
+      ? { outcome: "unchanged" as const, recovery: { kind: "later" as const, evidence } }
+      : {
+          outcome:
+            reason && reason !== "provider_error" && !record?.access_token
+              ? ("rejected" as const)
+              : ("unknown" as const),
+        }),
     status,
     ...(reason ? { reason } : {}),
   });
@@ -137,12 +149,25 @@ export function isRecoverableOAuthRefreshFailure(error: unknown): boolean {
     const record = asOptionalRecord(candidate);
     const presentation = asOptionalRecord(record?.oauthRefreshFailure);
     const reason = readOAuthRefreshErrorReason(record);
+    const challenge = asOptionalRecord(record?.oauthRefreshOutcome);
+    const verifiedChallenge =
+      challenge?.version === 1 &&
+      challenge.phase === "token-response" &&
+      challenge.outcome === "unchanged" &&
+      challenge.status === 403 &&
+      asOptionalRecord(challenge.recovery)?.kind === "later" &&
+      asOptionalRecord(challenge.recovery)?.evidence === "verified-intermediary-challenge";
     if (
       (reason !== undefined && reason !== "provider_error") ||
       terminalReason(presentation?.reason) ||
       presentation?.retryable === false ||
       [record?.status, presentation?.status].some(
-        (status) => typeof status === "number" && status >= 400 && status < 500 && status !== 429,
+        (status) =>
+          typeof status === "number" &&
+          status >= 400 &&
+          status < 500 &&
+          status !== 429 &&
+          !(status === 403 && verifiedChallenge),
       )
     ) {
       return false;
@@ -170,13 +195,14 @@ export function isRecoverableOAuthRefreshFailure(error: unknown): boolean {
       facts.outcome === "not-attempted" &&
       recovery?.evidence === "dispatch-not-started";
     const unchanged =
-      facts.phase === "token-response" &&
-      facts.outcome === "unchanged" &&
-      (facts.status === undefined ||
-        facts.status === 429 ||
-        (typeof facts.status === "number" && facts.status >= 500)) &&
-      (recovery?.evidence === "documented-nonconsuming-rejection" ||
-        recovery?.evidence === "documented-reusable-grant");
+      (facts.phase === "token-response" &&
+        facts.outcome === "unchanged" &&
+        (facts.status === undefined ||
+          facts.status === 429 ||
+          (typeof facts.status === "number" && facts.status >= 500)) &&
+        (recovery?.evidence === "documented-nonconsuming-rejection" ||
+          recovery?.evidence === "documented-reusable-grant")) ||
+      (verifiedChallenge && facts === challenge);
     if (recovery?.kind !== "later" || (!notAttempted && !unchanged)) {
       return false;
     }

@@ -1,3 +1,4 @@
+import { lookup as dnsLookup } from "node:dns/promises";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -64,6 +65,7 @@ const rotated = {
 };
 const logger = { info() {}, warn() {}, error() {} };
 let current: OpenClawConfig;
+vi.mock("node:dns/promises", { spy: true });
 let stateDir: string;
 function manager() {
   return new TwitchClientManager(logger);
@@ -111,11 +113,12 @@ function network(handler: (url: URL, init?: RequestInit) => Promise<Response>) {
       if (url.pathname === "/oauth2/token") {
         expect(init?.method).toBe("POST");
         expect(init?.signal).toBeInstanceOf(AbortSignal);
-        expect(init?.redirect).toBe("error");
-        expect(url.searchParams.get("client_id")).toBe(initial.clientId);
-        expect(url.searchParams.get("client_secret")).toBe(initial.clientSecret);
-        expect(url.searchParams.get("grant_type")).toBe("refresh_token");
-        tokenPosts.push(url.searchParams.get("refresh_token")!);
+        const form = new URLSearchParams(await new Response(init?.body).text());
+        expect(url.search).toBe("");
+        expect(form.get("client_id")).toBe(initial.clientId);
+        expect(form.get("client_secret")).toBe(initial.clientSecret);
+        expect(form.get("grant_type")).toBe("refresh_token");
+        tokenPosts.push(form.get("refresh_token")!);
         return await handler(url, init);
       }
       expect(url.href).toBe("https://id.twitch.tv/oauth2/validate");
@@ -130,6 +133,30 @@ function network(handler: (url: URL, init?: RequestInit) => Promise<Response>) {
   );
   return tokenPosts;
 }
+it("restores an undispatched grant after DNS failure at the real request guard", async () => {
+  const lookup = vi
+    .mocked(dnsLookup)
+    .mockRejectedValueOnce(
+      Object.assign(new Error("synthetic DNS offline"), { code: "EAI_AGAIN" }),
+    );
+  const originalFetch = globalThis.fetch;
+  let posts = 0;
+  vi.stubGlobal("fetch", (...args: Parameters<typeof fetch>) => {
+    posts++;
+    return originalFetch(...args);
+  });
+  try {
+    await expect(connect()).rejects.toThrow();
+    expect(posts).toBe(0);
+    expect(lookup).toHaveBeenCalled();
+  } finally {
+    lookup.mockRestore();
+  }
+  const attempts = network(async () => Response.json(rotated));
+  await connect();
+  expect(attempts).toEqual([initial.refreshToken]);
+});
+
 it("uses a fresh configured access token for chat scopes without consuming its refresh grant", async () => {
   const fresh = { ...initial, expiresIn: 3600, obtainmentTimestamp: Date.now() };
   current = { channels: { twitch: fresh } };
@@ -142,6 +169,31 @@ it("uses a fresh configured access token for chat scopes without consuming its r
   ).toBe(initial.accessToken);
   expect(posts).toEqual([]);
 });
+it("retains a completed rotation when token validation is transiently unavailable", async () => {
+  const posts = network(async () => Response.json(rotated));
+  const realFetch = globalThis.fetch;
+  let validations = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn<typeof fetch>(async (input, init) => {
+      if (
+        new URL(resolveRequestUrl(input)).pathname === "/oauth2/validate" &&
+        ++validations === 1
+      ) {
+        throw new TypeError("synthetic validation offline");
+      }
+      return await realFetch(input, init);
+    }),
+  );
+  await expect(connect()).rejects.toThrow();
+  await closeOpenClawStateDatabaseAsync();
+  resetPluginStateStoreForTests();
+  await connect();
+  expect(validations).toBe(2);
+  expect((await provider.getAccessTokenForIntent!("chat"))?.accessToken).toBe(rotated.access_token);
+  expect(posts).toEqual([initial.refreshToken]);
+});
+
 it("persists the initial rotation before chat and reopens the replacement for the next refresh", async () => {
   const posts = network(async () => Response.json(rotated));
   await connect();

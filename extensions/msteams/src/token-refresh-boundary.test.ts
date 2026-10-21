@@ -1,3 +1,4 @@
+import { lookup as dnsLookup } from "node:dns/promises";
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,7 +7,11 @@ import { resetPluginStateStoreForTests } from "openclaw/plugin-sdk/plugin-state-
 import { resolveRequestUrl } from "openclaw/plugin-sdk/request-url";
 import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { loadMSTeamsDelegatedTokens, saveMSTeamsDelegatedTokens } from "./delegated-state.js";
+import {
+  claimMSTeamsDelegatedTokenRefresh,
+  loadMSTeamsDelegatedTokens,
+  saveMSTeamsDelegatedTokens,
+} from "./delegated-state.js";
 import { setMSTeamsRuntime } from "./runtime.js";
 import { msteamsRuntimeStub } from "./test-support/runtime.js";
 import { resolveDelegatedAccessToken } from "./token.js";
@@ -29,6 +34,7 @@ const response = {
   expires_in: 3600,
   scope: "User.Read offline_access",
 };
+vi.mock("node:dns/promises", { spy: true });
 let stateDir: string;
 beforeEach(async () => {
   await closeOpenClawStateDatabaseAsync();
@@ -60,6 +66,38 @@ async function assertRequest(url: RequestInfo | URL, init?: RequestInit) {
   );
 }
 
+it("restores an undispatched Microsoft grant after DNS failure at the real request guard", async () => {
+  const lookup = vi
+    .mocked(dnsLookup)
+    .mockRejectedValueOnce(
+      Object.assign(new Error("synthetic DNS offline"), { code: "EAI_AGAIN" }),
+    );
+  const originalFetch = globalThis.fetch;
+  let posts = 0;
+  vi.stubGlobal("fetch", (...args: Parameters<typeof fetch>) => {
+    posts++;
+    return originalFetch(...args);
+  });
+  try {
+    await expect(resolveDelegatedAccessToken(params)).resolves.toBeUndefined();
+    expect(posts).toBe(0);
+    expect(lookup).toHaveBeenCalled();
+  } finally {
+    lookup.mockRestore();
+  }
+  expect((await loadMSTeamsDelegatedTokens(params.accountId))?.refreshToken).toBe(
+    original.refreshToken,
+  );
+  vi.stubGlobal(
+    "fetch",
+    vi.fn<typeof fetch>(async (url, init) => {
+      await assertRequest(url, init);
+      return Response.json(response);
+    }),
+  );
+  await expect(resolveDelegatedAccessToken(params)).resolves.toBe(response.access_token);
+});
+
 describe("Teams actual delegated HTTP parser and SQLite owner", () => {
   it("coalesces callers and publishes the replacement before returning access", async () => {
     const entered = createDeferred<void>();
@@ -88,25 +126,56 @@ describe("Teams actual delegated HTTP parser and SQLite owner", () => {
     });
   });
 
-  it.each(["socket-after-consumption", "structured-rejection"] as const)(
-    "does not replay %s",
+  it.each(["structured-rejection"] as const)("does not replay %s", async () => {
+    let consumed = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn<typeof fetch>(async (url, init) => {
+        await assertRequest(url, init);
+        consumed += 1;
+        return Response.json({ error: { code: "invalid_grant" } });
+      }),
+    );
+    await expect(resolveDelegatedAccessToken(params)).resolves.toBeUndefined();
+    await expect(resolveDelegatedAccessToken(params)).resolves.toBeUndefined();
+    expect(consumed).toBe(1);
+    expect(await loadMSTeamsDelegatedTokens(params.accountId)).toBeUndefined();
+  });
+
+  it.each(["lost-response", "503", "crash"])(
+    "recovers the reusable Microsoft grant after %s",
     async (mode) => {
-      let consumed = 0;
-      vi.stubGlobal(
-        "fetch",
-        vi.fn<typeof fetch>(async (url, init) => {
-          await assertRequest(url, init);
-          consumed += 1;
-          if (mode === "socket-after-consumption") {
-            throw Object.assign(new Error("synthetic lost response"), { code: "ECONNRESET" });
+      if (mode === "crash") {
+        expect(
+          await claimMSTeamsDelegatedTokenRefresh(
+            original,
+            "dead-request",
+            "dead-owner",
+            params.accountId,
+          ),
+        ).toBeDefined();
+      }
+      const network = vi.fn<typeof fetch>(async (url, init) => {
+        await assertRequest(url, init);
+        if (network.mock.calls.length === 1 && mode !== "crash") {
+          if (mode === "lost-response") {
+            throw new TypeError("synthetic lost response");
           }
-          return Response.json({ error: { code: "invalid_grant" } });
-        }),
-      );
-      await expect(resolveDelegatedAccessToken(params)).resolves.toBeUndefined();
-      await expect(resolveDelegatedAccessToken(params)).resolves.toBeUndefined();
-      expect(consumed).toBe(1);
-      expect(await loadMSTeamsDelegatedTokens(params.accountId)).toBeUndefined();
+          return Response.json({ error: "temporarily_unavailable" }, { status: 503 });
+        }
+        return Response.json(response);
+      });
+      vi.stubGlobal("fetch", network);
+      if (mode !== "crash") {
+        await expect(resolveDelegatedAccessToken(params)).resolves.toBeUndefined();
+      }
+      await closeOpenClawStateDatabaseAsync();
+      resetPluginStateStoreForTests();
+      await expect(resolveDelegatedAccessToken(params)).resolves.toBe(response.access_token);
+      expect(network).toHaveBeenCalledTimes(mode === "crash" ? 1 : 2);
+      expect(await loadMSTeamsDelegatedTokens(params.accountId)).toMatchObject({
+        refreshToken: response.refresh_token,
+      });
     },
   );
 

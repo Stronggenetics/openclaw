@@ -296,6 +296,40 @@ const withOutcome = (facts: unknown, cause?: unknown) =>
   Object.assign(new Error("synthetic provider failure", { cause }), { oauthRefreshOutcome: facts });
 it.each([
   ["actual non-dispatch evidence", withOutcome(notDispatched), true],
+  [
+    "documented reusable grant",
+    withOutcome({
+      ...documentedUnchanged,
+      recovery: { kind: "later", evidence: "documented-reusable-grant" },
+    }),
+    true,
+  ],
+  [
+    "verified intermediary challenge",
+    withOutcome({
+      ...documentedUnchanged,
+      status: 403,
+      recovery: { kind: "later", evidence: "verified-intermediary-challenge" },
+    }),
+    true,
+  ],
+  [
+    "challenge evidence cannot admit ordinary forbidden responses",
+    withOutcome({ ...documentedUnchanged, status: 403 }),
+    false,
+  ],
+  [
+    "challenge evidence cannot hide a terminal rejection",
+    withOutcome(
+      {
+        ...documentedUnchanged,
+        status: 403,
+        recovery: { kind: "later", evidence: "verified-intermediary-challenge" },
+      },
+      { error: "invalid_grant" },
+    ),
+    false,
+  ],
   ["documented nonconsuming response", withOutcome(documentedUnchanged), true],
   ["nested valid evidence", new Error("wrapper", { cause: withOutcome(notDispatched) }), true],
   ["unknown version", withOutcome({ ...notDispatched, version: 2 }), false],

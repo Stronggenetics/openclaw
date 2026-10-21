@@ -61,7 +61,11 @@ async function fetchMSTeamsTokens(params: {
   failureLabel: string;
   refresh: boolean;
 }): Promise<MSTeamsTokenResponse> {
+  let dispatched = false;
   const { response, release } = await fetchWithSsrFGuard({
+    beforeRequest: () => {
+      dispatched = true;
+    },
     url: params.tokenUrl,
     init: {
       method: "POST",
@@ -73,6 +77,27 @@ async function fetchMSTeamsTokens(params: {
       signal: AbortSignal.timeout(MSTEAMS_DEFAULT_TOKEN_FETCH_TIMEOUT_MS),
     },
     auditContext: params.auditContext,
+  }).catch((cause: unknown) => {
+    if (!params.refresh) {
+      throw cause;
+    }
+    throw createOAuthRefreshError(
+      "MSTeams refresh transport failed",
+      dispatched
+        ? {
+            version: 1,
+            phase: "token-response",
+            outcome: "unchanged",
+            recovery: { kind: "later", evidence: "documented-reusable-grant" },
+          }
+        : {
+            version: 1,
+            phase: "before-dispatch",
+            outcome: "not-attempted",
+            recovery: { kind: "later", evidence: "dispatch-not-started" },
+          },
+      { cause },
+    );
   });
 
   try {
@@ -101,7 +126,12 @@ async function fetchMSTeamsTokens(params: {
       );
     }
     if (params.refresh && (!response.ok || readOAuthRefreshErrorReason(data))) {
-      throw createOAuthRefreshResponseError("MSTeams token refresh", response.status, data);
+      throw createOAuthRefreshResponseError(
+        "MSTeams token refresh",
+        response.status,
+        data,
+        "documented-reusable-grant",
+      );
     }
     try {
       return parseMSTeamsTokenResponse(data, params.failureLabel);

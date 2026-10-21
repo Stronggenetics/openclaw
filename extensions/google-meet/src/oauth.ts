@@ -69,7 +69,11 @@ export function buildGoogleMeetAuthUrl(params: {
 
 async function executeGoogleTokenRequest(body: URLSearchParams) {
   const refreshing = body.get("grant_type") === "refresh_token";
+  let dispatched = false;
   const { response, release } = await fetchWithSsrFGuard({
+    beforeRequest: () => {
+      dispatched = true;
+    },
     url: GOOGLE_MEET_TOKEN_URL,
     init: {
       method: "POST",
@@ -82,6 +86,27 @@ async function executeGoogleTokenRequest(body: URLSearchParams) {
     policy: { allowedHostnames: [GOOGLE_MEET_TOKEN_HOST] },
     auditContext: "google-meet.oauth.token",
     timeoutMs: GOOGLE_OAUTH_REQUEST_TIMEOUT_MS,
+  }).catch((cause: unknown) => {
+    if (!refreshing) {
+      throw cause;
+    }
+    throw createOAuthRefreshError(
+      "Google Meet OAuth refresh transport failed",
+      dispatched
+        ? {
+            version: 1,
+            phase: "token-response",
+            outcome: "unchanged",
+            recovery: { kind: "later", evidence: "documented-reusable-grant" },
+          }
+        : {
+            version: 1,
+            phase: "before-dispatch",
+            outcome: "not-attempted",
+            recovery: { kind: "later", evidence: "dispatch-not-started" },
+          },
+      { cause },
+    );
   });
   try {
     if (!response.ok && !refreshing) {
@@ -96,7 +121,12 @@ async function executeGoogleTokenRequest(body: URLSearchParams) {
       token_type?: string;
     }>(response, "Google OAuth token", { maxBytes: GOOGLE_OAUTH_TOKEN_JSON_MAX_BYTES });
     if (refreshing && (!response.ok || readOAuthRefreshErrorReason(payload))) {
-      throw createOAuthRefreshResponseError("Google Meet OAuth refresh", response.status, payload);
+      throw createOAuthRefreshResponseError(
+        "Google Meet OAuth refresh",
+        response.status,
+        payload,
+        "documented-reusable-grant",
+      );
     }
     const accessToken =
       typeof payload?.access_token === "string" ? payload.access_token.trim() : undefined;

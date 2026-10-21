@@ -8,6 +8,7 @@ import {
 } from "../state/openclaw-state-db.js";
 import { operatorMcpOAuthIdentity } from "./mcp-oauth-identity.js";
 import { readMcpOAuthStore } from "./mcp-oauth-store.js";
+import * as oauthStore from "./mcp-oauth-store.js";
 import { resolveMcpOAuthAccessToken } from "./mcp-oauth.js";
 import { seedMcpOAuthStoreForTest } from "./mcp-oauth.test-support.js";
 
@@ -97,6 +98,31 @@ describe("real MCP SDK token HTTP and durable owner", () => {
     } finally {
       release.resolve();
       await Promise.allSettled([first, second]);
+    }
+  });
+
+  it("reconciles a committed claim whose write reply was lost before dispatch", async () => {
+    seed();
+    const mutate = oauthStore.mutateMcpOAuthStore;
+    const spy = vi.spyOn(oauthStore, "mutateMcpOAuthStore").mockImplementation(async (...args) => {
+      const result = await mutate(...args);
+      if (args[1].kind === "beginRefresh") {
+        spy.mockRestore();
+        throw new Error("synthetic claim receipt lost after commit");
+      }
+      return result;
+    });
+    const fetchFn = vi.fn<typeof fetch>(async () => tokens());
+    try {
+      await expect(resolveMcpOAuthAccessToken({ identity, fetchFn })).rejects.toThrow();
+      expect(fetchFn).not.toHaveBeenCalled();
+      expect((await readMcpOAuthStore(identity.storeKey)).refreshClaim).toBeUndefined();
+      await expect(resolveMcpOAuthAccessToken({ identity, fetchFn })).resolves.toBe(
+        "synthetic-new-access",
+      );
+      expect(fetchFn).toHaveBeenCalledOnce();
+    } finally {
+      spy.mockRestore();
     }
   });
 

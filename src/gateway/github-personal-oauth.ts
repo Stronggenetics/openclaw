@@ -19,7 +19,10 @@ import {
 } from "../agents/github-tool-identity.js";
 import { hasErrnoCode } from "../infra/errno.js";
 import { getOrCreatePromise } from "../shared/lazy-promise.js";
-import { isRecoverableOAuthRefreshFailure } from "../shared/oauth-refresh-outcome.js";
+import {
+  createOAuthRefreshError,
+  isRecoverableOAuthRefreshFailure,
+} from "../shared/oauth-refresh-outcome.js";
 import { resolveOpenClawStateSqlitePath } from "../state/openclaw-state-db.paths.js";
 import { withOpenClawStateLease } from "../state/openclaw-state-lease.js";
 import { observeUserGitHubConnectionAuthority } from "../state/user-github-connection-events.js";
@@ -404,7 +407,18 @@ export function createPersonalGitHubOAuthLifecycle() {
           let result;
           try {
             // The claim write invalidates the prior read; retain the claimed incarnation for dispatch.
-            const prepared = await prepareUserGitHubConnection(owner);
+            const prepared = await prepareUserGitHubConnection(owner).catch((cause: unknown) => {
+              throw createOAuthRefreshError(
+                "My GitHub refresh preparation failed before dispatch.",
+                {
+                  version: 1,
+                  phase: "before-dispatch",
+                  outcome: "not-attempted",
+                  recovery: { kind: "later", evidence: "dispatch-not-started" },
+                },
+                { cause },
+              );
+            });
             // Refresh rotates remote credentials: shutdown drains this bounded exchange, never aborts it.
             result = await refreshGitHubOAuthToken({
               refreshToken: selection.refreshToken,

@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 import { isFutureDateTimestampMs } from "openclaw/plugin-sdk/number-runtime";
-import { isRecoverableOAuthRefreshFailure } from "openclaw/plugin-sdk/provider-oauth-runtime";
+import {
+  createOAuthRefreshError,
+  isRecoverableOAuthRefreshFailure,
+} from "openclaw/plugin-sdk/provider-oauth-runtime";
 import {
   claimMSTeamsDelegatedTokenRefresh,
   loadMSTeamsDelegatedTokenState,
@@ -34,6 +37,12 @@ export async function resolveDelegatedAccessToken(params: {
   const tokens = normalizeMSTeamsDelegatedTokens(state);
   const active = refreshes.get(runtime) ?? new Map<string, Promise<string | undefined>>();
   refreshes.set(runtime, active);
+  if (state && "refreshClaim" in state && state.callerKey === callerKey) {
+    const pending = active.get(state.requestKey);
+    if (pending) {
+      return await pending;
+    }
+  }
   if (!tokens) {
     // A stranded claim stays fenced; only this caller's exact live owner can be joined.
     return state && "refreshClaim" in state && state.callerKey === callerKey
@@ -64,7 +73,15 @@ export async function resolveDelegatedAccessToken(params: {
       let refreshed;
       try {
         if (getMSTeamsRuntime() !== runtime) {
-          throw new Error("Microsoft Teams token owner changed");
+          throw createOAuthRefreshError(
+            "Microsoft Teams token owner changed before refresh dispatch",
+            {
+              version: 1,
+              phase: "before-dispatch",
+              outcome: "not-attempted",
+              recovery: { kind: "later", evidence: "dispatch-not-started" },
+            },
+          );
         }
         refreshed = await refreshMSTeamsDelegatedTokens({
           ...params,
@@ -74,10 +91,12 @@ export async function resolveDelegatedAccessToken(params: {
       } catch (error) {
         if (isRecoverableOAuthRefreshFailure(error)) {
           await claim.settle(tokens);
+        } else {
+          await claim.reject();
         }
         return undefined;
       }
-      // Post-success publication failure never restores a possibly consumed old grant.
+      // A failed publication returns no access; the retained Microsoft grant remains safely reusable.
       return (await claim.settle({ ...tokens, ...refreshed })) ? refreshed.accessToken : undefined;
     } catch {
       return undefined;

@@ -11,7 +11,8 @@ export type GoogleMeetOAuthRuntime = {
 };
 type OAuthConfig = GoogleMeetConfig["oauth"];
 type Credential = { accessToken?: string; refreshToken: string; expiresAt?: number };
-type State = { lineage: string } & ({ credential: Credential } | { claim: string });
+// Google documents refresh grants as reusable while valid; retain one across a crashed claim.
+type State = { lineage: string } & ({ credential: Credential; claim?: string } | { claim: string });
 const tasks = new WeakMap<
   GoogleMeetOAuthRuntime,
   Map<string, Promise<{ accessToken: string; expiresAt?: number; refreshed: boolean }>>
@@ -96,7 +97,8 @@ export async function resolveManagedGoogleMeetAccessToken(
         refreshed: false,
       };
     }
-    const claim: State = { lineage, claim: randomUUID() };
+    const claimId = randomUUID();
+    const claim: State = { lineage, credential, claim: claimId };
     const claimed = await store.compareAndApply("current", observed.comparison, {
       operation: "update",
       action: "set",
@@ -131,9 +133,18 @@ export async function resolveManagedGoogleMeetAccessToken(
         refreshToken: credential.refreshToken,
       });
     } catch (error) {
-      // Only settled provider evidence can restore; post-success writes never enter this catch.
+      // Terminal rejection fences the grant; interrupted reusable exchanges retain a recovery path.
       if (isRecoverableOAuthRefreshFailure(error)) {
         await settle(credential);
+      } else {
+        const current = await store.observe("current");
+        if (isDeepStrictEqual(current.value, claim)) {
+          await store.compareAndApply("current", current.comparison, {
+            operation: "update",
+            action: "set",
+            value: { lineage, claim: claimId },
+          });
+        }
       }
       throw error;
     }

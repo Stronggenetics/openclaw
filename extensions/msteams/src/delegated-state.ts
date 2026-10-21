@@ -14,6 +14,7 @@ export type MSTeamsDelegatedRefreshClaim = {
   refreshClaim: string;
   requestKey: string;
   callerKey: string;
+  credential?: MSTeamsDelegatedTokens;
 };
 type DelegatedTokenState = MSTeamsDelegatedTokens | MSTeamsDelegatedRefreshClaim;
 
@@ -41,7 +42,14 @@ export function normalizeMSTeamsDelegatedTokens(value: unknown): MSTeamsDelegate
   if (!value || typeof value !== "object") {
     return null;
   }
-  const token = value as Partial<MSTeamsDelegatedTokens>;
+  // Microsoft explicitly retains old refresh grants after exchange, so a crashed claim can resume.
+  const candidate = value as Partial<MSTeamsDelegatedRefreshClaim>;
+  const token = (candidate.refreshClaim ? candidate.credential : value) as
+    | Partial<MSTeamsDelegatedTokens>
+    | undefined;
+  if (!token) {
+    return null;
+  }
   if (
     typeof token.accessToken !== "string" ||
     !token.accessToken ||
@@ -82,7 +90,7 @@ export async function claimMSTeamsDelegatedTokenRefresh(
   if (!isDeepStrictEqual(normalizeMSTeamsDelegatedTokens(observed.value), tokens)) {
     return undefined;
   }
-  const claim = { refreshClaim: randomUUID(), requestKey, callerKey };
+  const claim = { refreshClaim: randomUUID(), requestKey, callerKey, credential: tokens };
   const result = await store.compareAndApply(MSTEAMS_DELEGATED_TOKEN_KEY, observed.comparison, {
     operation: "update",
     action: "set",
@@ -92,6 +100,16 @@ export async function claimMSTeamsDelegatedTokenRefresh(
     return undefined;
   }
   return {
+    async reject(): Promise<void> {
+      const current = await store.observe(MSTEAMS_DELEGATED_TOKEN_KEY);
+      if (isDeepStrictEqual(current.value, claim)) {
+        await store.compareAndApply(MSTEAMS_DELEGATED_TOKEN_KEY, current.comparison, {
+          operation: "update",
+          action: "set",
+          value: { refreshClaim: claim.refreshClaim, requestKey, callerKey },
+        });
+      }
+    },
     async settle(replacement: MSTeamsDelegatedTokens): Promise<boolean> {
       const current = await store.observe(MSTEAMS_DELEGATED_TOKEN_KEY);
       if (!isDeepStrictEqual(current.value, claim)) {

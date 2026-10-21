@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { realpathSync, statSync } from "node:fs";
 import { gunzipSync } from "node:zlib";
 import { buildTimeoutAbortSignal } from "openclaw/plugin-sdk/extension-shared";
@@ -7,7 +7,6 @@ import {
   resolveExpiresAtMsFromDurationMs,
   resolveExpiresAtMsFromDurationSeconds,
 } from "openclaw/plugin-sdk/number-runtime";
-import { createPluginStateKeyedStoreV2 } from "openclaw/plugin-sdk/plugin-state-store-runtime";
 import {
   createOAuthRefreshError,
   createOAuthRefreshResponseError,
@@ -113,9 +112,8 @@ function resolveGoogleAuthorizedUserCredentials(
   };
 }
 
-/** The input file remains externally owned. SQLite records only the exact in-flight grant. */
+/** Google documents refresh grants as reusable; the external ADC owner retains custody. */
 async function refreshGoogleVertexAuthorizedUserAccessToken(params: {
-  credentialsPath: string;
   credentials: GoogleAuthorizedUserCredentials;
   identity: string;
   assertCurrent: () => void;
@@ -142,30 +140,6 @@ async function refreshGoogleVertexAuthorizedUserAccessToken(params: {
     return await pending;
   }
   const task = (async () => {
-    const store = createPluginStateKeyedStoreV2<{ generation: string; claim?: string }>(
-      "google",
-      { namespace: "vertex-adc-oauth", maxEntries: 1000, overflowPolicy: "reject-new" },
-      { assertCurrent: params.assertCurrent },
-    );
-    const key = createHash("sha256").update(params.credentialsPath).digest("hex");
-    const generation = createHash("sha256")
-      .update(JSON.stringify(params.credentials))
-      .digest("hex");
-    const observed = await store.observe(key);
-    if (observed.value?.generation === generation && observed.value.claim) {
-      throw new Error(
-        "Google Vertex ADC refresh is pending or uncertain; reauthorize with its external ADC owner.",
-      );
-    }
-    const claim = randomUUID();
-    const admitted = await store.compareAndApply(key, observed.comparison, {
-      operation: "update",
-      action: "set",
-      value: { generation, claim },
-    });
-    if (admitted.status !== "applied") {
-      throw new Error("Google Vertex ADC refresh owner changed; retry with its current input.");
-    }
     const body = new URLSearchParams({
       client_id: clientId,
       client_secret: clientSecret,
@@ -198,6 +172,7 @@ async function refreshGoogleVertexAuthorizedUserAccessToken(params: {
           "Google Vertex ADC refresh",
           response.status,
           payload,
+          "documented-reusable-grant",
         );
         throw responseFailure;
       }
@@ -227,22 +202,6 @@ async function refreshGoogleVertexAuthorizedUserAccessToken(params: {
       params.assertCurrent();
     } catch (error) {
       if (!dispatched) {
-        const current = await store.observe(key);
-        if (current.value?.claim !== claim || current.value.generation !== generation) {
-          throw new Error("Google Vertex ADC claim changed before nonattempt settlement.", {
-            cause: error,
-          });
-        }
-        const restored = await store.compareAndApply(key, current.comparison, {
-          operation: "update",
-          action: "set",
-          value: { generation },
-        });
-        if (restored.status !== "applied") {
-          throw new Error("Google Vertex ADC claim changed before nonattempt settlement.", {
-            cause: error,
-          });
-        }
         throw createOAuthRefreshError("Google Vertex ADC refresh did not start.", {
           version: 1,
           phase: "before-dispatch",
@@ -262,8 +221,13 @@ async function refreshGoogleVertexAuthorizedUserAccessToken(params: {
           : undefined;
       const failure = createOAuthRefreshError(
         boundedDiagnostic?.message ??
-          "Google Vertex ADC refresh outcome is uncertain; reauthorize with its external ADC owner.",
-        { version: 1, phase: "after-token-response", outcome: "unknown" },
+          "Google Vertex ADC refresh failed; retry with its externally owned reusable grant.",
+        {
+          version: 1,
+          phase: "token-response",
+          outcome: "unchanged",
+          recovery: { kind: "later", evidence: "documented-reusable-grant" },
+        },
         { cause: error },
       );
       if (boundedDiagnostic?.name === "TimeoutError") {
@@ -272,19 +236,6 @@ async function refreshGoogleVertexAuthorizedUserAccessToken(params: {
       throw failure;
     } finally {
       cleanup();
-    }
-    // This storage/authority boundary is deliberately outside provider-failure recovery.
-    const current = await store.observe(key);
-    if (current.value?.claim !== claim || current.value.generation !== generation) {
-      throw new Error("Google Vertex ADC refresh owner changed before settlement.");
-    }
-    const settled = await store.compareAndApply(key, current.comparison, {
-      operation: "update",
-      action: "set",
-      value: { generation },
-    });
-    if (settled.status !== "applied") {
-      throw new Error("Google Vertex ADC refresh owner changed before settlement.");
     }
     params.assertCurrent();
     if (expiresAtMs !== undefined) {
@@ -461,7 +412,6 @@ export async function resolveGoogleVertexAuthorizedUserHeaders(
   const token =
     userAdc && adcPath
       ? await refreshGoogleVertexAuthorizedUserAccessToken({
-          credentialsPath: adcPath,
           credentials: userAdc,
           fetchImpl,
           identity,

@@ -6,7 +6,7 @@ import {
   createOAuthRefreshResponseError,
   readOAuthRefreshErrorReason,
 } from "../shared/oauth-refresh-outcome.js";
-import { mutateMcpOAuthStore } from "./mcp-oauth-store.js";
+import { mutateMcpOAuthStore, readMcpOAuthStore } from "./mcp-oauth-store.js";
 
 /** Adapt the SDK token POST to its existing SQLite lease, not a second OAuth owner. */
 export function createMcpOAuthRefreshBoundary(
@@ -67,12 +67,25 @@ export function createMcpOAuthRefreshBoundary(
             throw unknown();
           } // No SDK fallback may repeat a possibly consumed POST.
           await check();
-          await mutateMcpOAuthStore(
-            options,
-            { kind: "beginRefresh", claim: id, refreshToken: form.get("refresh_token") ?? "" },
-            assertCurrent ? { assertCurrent } : undefined,
-          );
-          claimed = true;
+          try {
+            const result = await mutateMcpOAuthStore(
+              options,
+              { kind: "beginRefresh", claim: id, refreshToken: form.get("refresh_token") ?? "" },
+              assertCurrent ? { assertCurrent } : undefined,
+            );
+            claimed = result.applied && result.store.refreshClaim === id;
+            if (!claimed) {
+              throw unknown();
+            }
+          } catch (error) {
+            // A worker may commit and lose its reply. Reconcile under the same live lease
+            // so finish restores only our exact undispatched claim.
+            await check();
+            const current = await readMcpOAuthStore(options.storeKey, options.context);
+            await check();
+            claimed = current.refreshClaim === id;
+            throw error;
+          }
           await check();
           const signal = AbortSignal.any([
             options.lease.signal,

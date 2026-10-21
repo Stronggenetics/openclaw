@@ -116,7 +116,7 @@ export const databaseWorkerCoreTestFiles = [
   "src/gateway/mention-inbox.guest.test.ts",
   "src/gateway/session-activity-summary-source.test.ts",
   "src/gateway/github-oauth-lifecycle.test.ts",
-  "src/gateway/github-oauth-refresh-boundary.test.ts",
+  "src/gateway/github-oauth-lifecycle-helpers.test.ts",
   "src/gateway/github-oauth-lifecycle.scheduling.test.ts",
   "src/tts/tts-preferences.worker.test.ts",
   "src/agents/openclaw-tools.session-status.gateway-model.test.ts",
