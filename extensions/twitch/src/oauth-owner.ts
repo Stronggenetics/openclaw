@@ -158,7 +158,7 @@ export async function createManagedTwitchAuthProvider(
     if (cfg.channels?.twitch?.enabled === false || current?.enabled === false) {
       throw new Error("Twitch account is disabled; enable it before using its OAuth grant");
     }
-    const currentToken = normalizeToken(resolveTwitchToken(cfg, { accountId: id }).token);
+    const currentToken = normalizeToken(resolveTwitchToken(cfg, id).token);
     if (!current || lineageOf(current, currentToken) !== lineage) {
       throw new Error("Twitch OAuth account changed; retry with its current configuration");
     }

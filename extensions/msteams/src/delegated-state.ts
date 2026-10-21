@@ -43,10 +43,9 @@ export function normalizeMSTeamsDelegatedTokens(value: unknown): MSTeamsDelegate
     return null;
   }
   // Microsoft explicitly retains old refresh grants after exchange, so a crashed claim can resume.
-  const candidate = value as Partial<MSTeamsDelegatedRefreshClaim>;
-  const token = (candidate.refreshClaim ? candidate.credential : value) as
-    | Partial<MSTeamsDelegatedTokens>
-    | undefined;
+  const candidate = value as Partial<MSTeamsDelegatedRefreshClaim> &
+    Partial<MSTeamsDelegatedTokens>;
+  const token = candidate.refreshClaim ? candidate.credential : candidate;
   if (!token) {
     return null;
   }

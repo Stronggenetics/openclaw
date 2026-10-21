@@ -41,7 +41,9 @@ describe("OAuth refresh failure ownership", () => {
       };
       const refreshCredential = vi.fn().mockRejectedValue(new Error(message));
       mockOAuthProviderOperations({ refreshCredential });
-      fx.settle(() => vi.restoreAllMocks());
+      fx.settle(() => {
+        vi.restoreAllMocks();
+      });
       const agentDir = fx.mainDir;
       const manager = createOAuthManager();
       saveAuthProfileStore({ version: 1, profiles: { [profileId]: original } }, agentDir);

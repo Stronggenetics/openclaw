@@ -12,6 +12,7 @@ import {
   mintSecretSentinel,
   resolveSecretSentinel,
 } from "../../../secrets/sentinel.js";
+import { createOAuthRefreshError } from "../../../shared/oauth-refresh-outcome.js";
 import { closeOpenClawStateDatabaseForTest } from "../../../state/openclaw-state-db.js";
 import { withEnvAsync } from "../../../test-utils/env.js";
 import { cleanupSessionStateForTest } from "../../../test-utils/session-state-cleanup.js";
@@ -856,9 +857,14 @@ it.each([
     const authStore: AuthProfileStore = { version: 1, profiles: { [profileId]: credential } };
     saveAuthProfileStore(authStore, agentDir, { filterExternalAuthProfiles: false });
     mockOAuthProviderOperations({
+      // Only provider-owned evidence restores the claimed grant; the caller policy owns health writes.
       refreshCredential: async () => {
-        throw Object.assign(new Error("token endpoint unavailable"), {
-          oauthRefreshFailure: { status: 503, retryable: true },
+        throw createOAuthRefreshError("token endpoint unavailable", {
+          version: 1,
+          phase: "token-response",
+          outcome: "unchanged",
+          status: 503,
+          recovery: { kind: "later", evidence: "documented-reusable-grant" },
         });
       },
     });

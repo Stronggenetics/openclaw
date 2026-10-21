@@ -161,18 +161,15 @@ describe("createOAuthManager", () => {
         .mockResolvedValueOnce(rotated);
       const manager = createTestManager({ refreshCredential });
       saveCredential(profileId, original, mainAgentDir);
-      const resolve = () =>
-        manager.resolveOAuthAccess({
-          store: ensureAuthProfileStoreWithoutExternalProfiles(mainAgentDir),
-          profileId,
-          credential: original,
-          agentDir: mainAgentDir,
-        });
-      await expect(resolve()).rejects.toThrow("dispatch did not start");
+      await expect(resolve(manager, profileId, original, mainAgentDir)).rejects.toThrow(
+        "dispatch did not start",
+      );
       const persisted = loadPersistedAuthProfileStore(mainAgentDir)!;
       expect(persisted.profiles[profileId]).toEqual(original);
       expect(persisted.usageStats?.[profileId]).toBeUndefined();
-      await expect(resolve()).resolves.toMatchObject({ apiKey: rotated.access });
+      await expect(resolve(manager, profileId, original, mainAgentDir)).resolves.toMatchObject({
+        apiKey: rotated.access,
+      });
       expect(refreshCredential).toHaveBeenCalledTimes(2);
       expect(refreshCredential.mock.calls[1]?.[0]).toEqual(original);
       expect(loadPersistedAuthProfileStore(mainAgentDir)?.profiles[profileId]).toMatchObject(
