@@ -264,9 +264,9 @@ export async function resolveGoogleMeetAccessToken(params: {
   accessToken?: string;
   expiresAt?: number;
 }): Promise<{ accessToken: string; expiresAt?: number; refreshed: boolean }> {
-  if (shouldUseCachedGoogleMeetAccessToken(params)) {
+  if (params.accessToken && shouldUseCachedGoogleMeetAccessToken(params)) {
     return {
-      accessToken: params.accessToken!.trim(),
+      accessToken: params.accessToken.trim(),
       expiresAt: params.expiresAt,
       refreshed: false,
     };
@@ -304,24 +304,6 @@ function isLocalCallbackListenerError(error: unknown): boolean {
   );
 }
 
-async function readManualGoogleMeetAuthCode(params: {
-  state: string;
-  promptInput: (message: string) => Promise<string>;
-}): Promise<string> {
-  const input = await params.promptInput("Paste the full redirect URL here: ");
-  const parsed = parseOAuthCallbackInput(input, {
-    missingState: "Missing 'state' parameter. Paste the full redirect URL.",
-    invalidInput: "Paste the full redirect URL, not just the code.",
-  });
-  if ("error" in parsed) {
-    throw new Error(parsed.error);
-  }
-  if (parsed.state !== params.state) {
-    throw new Error("OAuth state mismatch - please try again");
-  }
-  return parsed.code;
-}
-
 export async function waitForGoogleMeetAuthCode(params: {
   state: string;
   manual: boolean;
@@ -330,12 +312,24 @@ export async function waitForGoogleMeetAuthCode(params: {
   promptInput: (message: string) => Promise<string>;
   writeLine: (message: string) => void;
 }): Promise<string> {
+  async function readManualGoogleMeetAuthCode(): Promise<string> {
+    const { state, promptInput } = params;
+    const input = await promptInput("Paste the full redirect URL here: ");
+    const parsed = parseOAuthCallbackInput(input, {
+      missingState: "Missing 'state' parameter. Paste the full redirect URL.",
+      invalidInput: "Paste the full redirect URL, not just the code.",
+    });
+    if ("error" in parsed) {
+      throw new Error(parsed.error);
+    }
+    if (parsed.state !== state) {
+      throw new Error("OAuth state mismatch - please try again");
+    }
+    return parsed.code;
+  }
   params.writeLine(`Open this URL in your browser:\n\n${params.authUrl}\n`);
   if (params.manual) {
-    return await readManualGoogleMeetAuthCode({
-      state: params.state,
-      promptInput: params.promptInput,
-    });
+    return await readManualGoogleMeetAuthCode();
   }
   try {
     const callback = await waitForLocalOAuthCallback({
@@ -352,9 +346,6 @@ export async function waitForGoogleMeetAuthCode(params: {
       throw error;
     }
     params.writeLine("Local callback server failed. Switching to manual mode...");
-    return await readManualGoogleMeetAuthCode({
-      state: params.state,
-      promptInput: params.promptInput,
-    });
+    return await readManualGoogleMeetAuthCode();
   }
 }

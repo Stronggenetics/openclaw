@@ -1,31 +1,17 @@
 /** Tests durable ownership after an OAuth refresh failure. */
-import path from "node:path";
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { resetFileLockStateForTest } from "../../plugin-sdk/file-lock.js";
+import { describe, expect, it, vi } from "vitest";
 import { AsyncWorkScope } from "../../shared/async-work-scope.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import {
   createOAuthRefreshError,
   type OAuthRefreshOutcome,
 } from "../../shared/oauth-refresh-outcome.js";
-import { captureEnv } from "../../test-utils/env.js";
-import { getOAuthProviderRuntimeMocks } from "./oauth-common-mocks.test-support.js";
-import "./oauth-external-auth-passthrough.test-support.js";
+import { useOAuthCoordinationFixture } from "./oauth-coordination.test-support.js";
 import { createOAuthManager } from "./oauth-manager.js";
 import { mockOAuthProviderOperations } from "./oauth-native-provider.test-support.js";
 import { isOAuthRefreshFence, isPendingOAuthRefreshFence } from "./oauth-refresh-marker.js";
-import {
-  OAUTH_AGENT_ENV_KEYS,
-  createOAuthMainAgentDir,
-  createOAuthTestTempRoot,
-  createExpiredOauthStore,
-  removeOAuthTestTempRoot,
-  resolveApiKeyForProfileInTest,
-  resetOAuthProviderRuntimeMocks,
-} from "./oauth-test-utils.js";
-import { resolveApiKeyForProfile } from "./oauth.js";
+import { createExpiredOauthStore } from "./oauth-test-utils.js";
 import { loadPersistedAuthProfileStore } from "./persisted.js";
-import { clearRuntimeAuthProfileStoreSnapshots } from "./runtime-snapshots.js";
 import {
   ensureAuthProfileStore,
   ensureAuthProfileStoreWithoutExternalProfiles,
@@ -33,10 +19,8 @@ import {
 } from "./store-runtime.js";
 import type { OAuthCredential } from "./types.js";
 
-const {
-  refreshProviderOAuthCredentialWithPluginMock,
-  formatProviderAuthProfileApiKeyWithPluginMock,
-} = getOAuthProviderRuntimeMocks();
+// Real file locks and queue admissions: the cohort case observes native admissions.
+const fx = useOAuthCoordinationFixture();
 
 vi.mock("../../llm/oauth.js", () => ({
   getOAuthApiKey: vi.fn(async () => null),
@@ -44,40 +28,6 @@ vi.mock("../../llm/oauth.js", () => ({
 }));
 
 describe("OAuth refresh failure ownership", () => {
-  const envSnapshot = captureEnv(OAUTH_AGENT_ENV_KEYS);
-  let tempRoot = "";
-  let agentDir = "";
-  let caseIndex = 0;
-  let settleCaseWork: (() => Promise<void>) | undefined;
-
-  beforeAll(async () => {
-    tempRoot = await createOAuthTestTempRoot("openclaw-oauth-queue-");
-  });
-
-  beforeEach(async () => {
-    resetFileLockStateForTest();
-    resetOAuthProviderRuntimeMocks({
-      refreshProviderOAuthCredentialWithPluginMock,
-      formatProviderAuthProfileApiKeyWithPluginMock,
-    });
-    clearRuntimeAuthProfileStoreSnapshots();
-    const caseRoot = path.join(tempRoot, `case-${++caseIndex}`);
-    agentDir = await createOAuthMainAgentDir(caseRoot);
-  });
-
-  afterEach(async () => {
-    await settleCaseWork?.();
-    settleCaseWork = undefined;
-    vi.restoreAllMocks();
-    envSnapshot.restore();
-    resetFileLockStateForTest();
-    clearRuntimeAuthProfileStoreSnapshots();
-  });
-
-  afterAll(async () => {
-    await removeOAuthTestTempRoot(tempRoot);
-  });
-
   it.each(["xAI OAuth token response is missing access_token", "unclassified upstream failure"])(
     "keeps provider validation and unknown failures terminal: %s",
     async (message) => {
@@ -91,6 +41,8 @@ describe("OAuth refresh failure ownership", () => {
       };
       const refreshCredential = vi.fn().mockRejectedValue(new Error(message));
       mockOAuthProviderOperations({ refreshCredential });
+      fx.settle(() => vi.restoreAllMocks());
+      const agentDir = fx.mainDir;
       const manager = createOAuthManager();
       saveAuthProfileStore({ version: 1, profiles: { [profileId]: original } }, agentDir);
       const resolve = () =>
@@ -114,10 +66,10 @@ describe("OAuth refresh failure ownership", () => {
   it("fences the failed generation instead of retrying it", async () => {
     const profileId = "openai:default";
     const provider = "openai";
-    saveAuthProfileStore(createExpiredOauthStore({ profileId, provider }), agentDir);
+    saveAuthProfileStore(createExpiredOauthStore({ profileId, provider }), fx.mainDir);
 
     let callCount = 0;
-    refreshProviderOAuthCredentialWithPluginMock.mockImplementation(async () => {
+    fx.refresh.mockImplementation(async () => {
       callCount += 1;
       if (callCount === 1) {
         throw new Error("simulated upstream failure");
@@ -133,16 +85,8 @@ describe("OAuth refresh failure ownership", () => {
     });
 
     const results = await Promise.all([
-      resolveApiKeyForProfileInTest(resolveApiKeyForProfile, {
-        store: ensureAuthProfileStore(agentDir),
-        profileId,
-        agentDir,
-      }).catch((e: unknown) => e),
-      resolveApiKeyForProfileInTest(resolveApiKeyForProfile, {
-        store: ensureAuthProfileStore(agentDir),
-        profileId,
-        agentDir,
-      }).catch((e: unknown) => e),
+      fx.resolve(fx.mainDir).catch((e: unknown) => e),
+      fx.resolve(fx.mainDir).catch((e: unknown) => e),
     ]);
 
     expect(results.filter((result) => result instanceof Error)).toHaveLength(1);
@@ -181,8 +125,8 @@ describe("OAuth refresh failure ownership", () => {
         refresh: "synthetic-cohort-refresh",
         expires: 1,
       };
-      const firstDir = path.join(agentDir, "..", "..", "first", "agent");
-      const secondDir = path.join(agentDir, "..", "..", "second", "agent");
+      const firstDir = await fx.agentDirectory("first");
+      const secondDir = await fx.agentDirectory("second");
       const nextGeneration = { ...credential, access: "new-generation", refresh: "new-refresh" };
       const refreshed = {
         ...nextGeneration,
@@ -245,11 +189,12 @@ describe("OAuth refresh failure ownership", () => {
           agentDir: dir,
         });
       const requests: Promise<unknown>[] = [];
-      settleCaseWork = async () => {
+      fx.settle(async () => {
         release.resolve();
         releaseSecond.resolve();
         await Promise.allSettled(requests);
-      };
+        vi.restoreAllMocks();
+      });
       // The second path has identical bytes. The final first-path waiter will see
       // a newer expired generation, installed while the second provider call is held.
       const start = (dir: string) => {
@@ -309,7 +254,7 @@ describe("OAuth refresh failure ownership", () => {
       refresh: "rotated-refresh",
       expires: Date.now() + 600_000,
     };
-    saveAuthProfileStore({ version: 1, profiles: { [profileId]: credential } }, agentDir);
+    saveAuthProfileStore({ version: 1, profiles: { [profileId]: credential } }, fx.mainDir);
     const started = createDeferredCore();
     const release = createDeferredCore<OAuthCredential>();
     const settled = createDeferredCore();
@@ -326,10 +271,10 @@ describe("OAuth refresh failure ownership", () => {
     });
     const manager = createOAuthManager();
     const params = {
-      store: ensureAuthProfileStore(agentDir),
+      store: ensureAuthProfileStore(fx.mainDir),
       profileId,
       credential,
-      agentDir,
+      agentDir: fx.mainDir,
     };
     const activeController = new AbortController();
     const queuedController = new AbortController();
@@ -347,7 +292,10 @@ describe("OAuth refresh failure ownership", () => {
       release.resolve(refreshed);
       await Promise.allSettled([...requests, scope.drain()]);
     };
-    settleCaseWork = cleanup;
+    fx.settle(async () => {
+      await cleanup();
+      vi.restoreAllMocks();
+    });
     try {
       await started.promise;
       const queued = scope.run(() =>
@@ -359,7 +307,7 @@ describe("OAuth refresh failure ownership", () => {
       await queuedRejected;
       activeController.abort(activeReason);
       await activeRejected;
-      const pending = ensureAuthProfileStoreWithoutExternalProfiles(agentDir).profiles[profileId];
+      const pending = ensureAuthProfileStoreWithoutExternalProfiles(fx.mainDir).profiles[profileId];
       expect(pending?.type === "oauth" && isPendingOAuthRefreshFence(pending)).toBe(true);
       let drained = false;
       const draining = scope.drain().then(() => {
@@ -374,7 +322,7 @@ describe("OAuth refresh failure ownership", () => {
       requests.push(continuing);
       await expect(continuing).resolves.toMatchObject({ apiKey: "rotated-access" });
       expect(
-        ensureAuthProfileStoreWithoutExternalProfiles(agentDir).profiles[profileId],
+        ensureAuthProfileStoreWithoutExternalProfiles(fx.mainDir).profiles[profileId],
       ).toMatchObject(refreshed);
       expect(refreshCredential).toHaveBeenCalledOnce();
     } finally {
