@@ -239,8 +239,9 @@ failure, exact owner and peer claims are restored only under current credential
 and caller authority, without replacing a newer login. Personal-account rollback
 retains both the account locator and its current canonical owner's selection
 authority across profile merges. Disconnecting or switching that owner's default
-account during refresh prevents restoration; this does not revoke otherwise valid
-explicit session pins. A lost response
+account during refresh prevents restoration, even for an explicit session pin.
+The failed credential stays terminal and needs reauthentication; a default change
+alone does not invalidate a usable, unrefreshed pin. A lost response
 may already have consumed a rotating refresh token: recovery is best effort,
 and a subsequent definitive rejection still requires authentication. Invalid
 returned credentials and post-success settlement failures remain fail-closed.

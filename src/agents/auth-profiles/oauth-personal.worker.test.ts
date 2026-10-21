@@ -637,29 +637,32 @@ it.for(["unacknowledged", "acknowledged"] as const)(
   },
 );
 
-it("preserves an unchanged personal grant after a retryable failure and recovers", async ({
-  profileId,
-  credential,
-  replacement,
-}) => {
-  const refreshCredential = vi
-    .fn()
-    .mockRejectedValueOnce(
-      Object.assign(new Error("503 unavailable"), {
-        oauthRefreshFailure: { status: 503, retryable: true },
-      }),
-    )
-    .mockResolvedValueOnce(replacement);
-  const manager = managerWith({ refreshCredential });
-  await expect(resolve(manager, profileId, credential)).rejects.toThrow();
-  expect(readUserModelAuthProfile(profileId)?.credential).toEqual(credential);
-  expect(readUserModelAuthProfile(profileId)?.usageStats).toBeUndefined();
-  await expect(resolve(manager, profileId, credential)).resolves.toMatchObject({
-    apiKey: replacement.access,
-  });
-  expect(readUserModelAuthProfile(profileId)?.credential).toEqual(replacement);
-  expect(refreshCredential).toHaveBeenCalledTimes(2);
-});
+it.for(["canonical", "merged"] as const)(
+  "preserves an unchanged %s personal grant after a retryable failure and recovers",
+  async (identity, { owner, profileId, credential, replacement }) => {
+    if (identity === "merged") {
+      const target = ensureProfileForEmail("personal-retry-merged@example.test");
+      await mergeCanonicalUserProfiles(owner.id, target.id);
+    }
+    const refreshCredential = vi
+      .fn()
+      .mockRejectedValueOnce(
+        Object.assign(new Error("503 unavailable"), {
+          oauthRefreshFailure: { status: 503, retryable: true },
+        }),
+      )
+      .mockResolvedValueOnce(replacement);
+    const manager = managerWith({ refreshCredential });
+    await expect(resolve(manager, profileId, credential)).rejects.toThrow();
+    expect(readUserModelAuthProfile(profileId)?.credential).toEqual(credential);
+    expect(readUserModelAuthProfile(profileId)?.usageStats).toBeUndefined();
+    await expect(resolve(manager, profileId, credential)).resolves.toMatchObject({
+      apiKey: replacement.access,
+    });
+    expect(readUserModelAuthProfile(profileId)?.credential).toEqual(replacement);
+    expect(refreshCredential).toHaveBeenCalledTimes(2);
+  },
+);
 
 it.for(["disconnect", "reassignment", "same-account-reassignment"] as const)(
   "rejects retired personal authority after transient %s",
@@ -780,6 +783,43 @@ it.for(["disconnect", "link-switch", "merge"] as const)(
     }
   },
 );
+
+it("rechecks captured personal authority before persisting the refresh claim", async ({
+  owner,
+  profileId,
+  credential,
+}) => {
+  const captured = createDeferredCore();
+  const release = createDeferredCore();
+  const refreshCredential = vi.fn();
+  const manager = managerWith({ refreshCredential });
+  await withPersonalAuthProfileStore(profileId, async (store) => {
+    await store.read();
+    const capture = store.captureRefreshAuthority.bind(store);
+    vi.spyOn(store, "captureRefreshAuthority").mockImplementation(async () => {
+      const assertCurrent = await capture();
+      captured.resolve();
+      await release.promise;
+      return assertCurrent;
+    });
+    const pending = resolve(manager, profileId, credential, { personalStore: store }).catch(
+      (error: unknown) => error,
+    );
+    try {
+      await captured.promise;
+      clearUserProfileAuthLink({ profileId: owner.id, provider: credential.provider });
+      release.resolve();
+      expect(await pending).toMatchObject({
+        message: expect.stringContaining("selection changed during refresh"),
+      });
+      expect(readUserModelAuthProfile(profileId)?.credential).toEqual(credential);
+      expect(refreshCredential).not.toHaveBeenCalled();
+    } finally {
+      release.resolve();
+      await pending;
+    }
+  });
+});
 
 it("does not persist a refresh claim when personal authority capture fails", async ({
   profileId,

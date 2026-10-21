@@ -147,7 +147,7 @@ describe("OAuth refresh failure ownership", () => {
   });
 
   it.each([429, 503])(
-    "shares a transient %s failure with already queued callers only",
+    "shares a transient %s failure only with queued callers for the same path and generation",
     async (status) => {
       const profileId = "xai:cohort";
       const credential: OAuthCredential = {
@@ -157,46 +157,117 @@ describe("OAuth refresh failure ownership", () => {
         refresh: "synthetic-cohort-refresh",
         expires: 1,
       };
-      const refreshed = { ...credential, access: "rotated-access", expires: Date.now() + 600_000 };
-      saveAuthProfileStore({ version: 1, profiles: { [profileId]: credential } }, agentDir);
+      const firstDir = path.join(agentDir, "..", "..", "first", "agent");
+      const secondDir = path.join(agentDir, "..", "..", "second", "agent");
+      const nextGeneration = { ...credential, access: "new-generation", refresh: "new-refresh" };
+      const refreshed = {
+        ...nextGeneration,
+        access: "rotated-access",
+        expires: Date.now() + 600_000,
+      };
+      for (const dir of [firstDir, secondDir]) {
+        saveAuthProfileStore({ version: 1, profiles: { [profileId]: credential } }, dir);
+      }
       const release = createDeferredCore();
-      // Shared fixture setup resets module identity; observe the manager's current queue module.
+      const secondEntered = createDeferredCore();
+      const releaseSecond = createDeferredCore();
+      const admissions = [
+        createDeferredCore(),
+        createDeferredCore(),
+        createDeferredCore(),
+        createDeferredCore(),
+      ] as const;
+      // Observe actual native admissions without replacing the queue or file locks.
+      // Shared fixture setup resets module identity, so use the manager's current module.
       const { KeyedAsyncQueue } = await import("../../plugin-sdk/keyed-async-queue.js");
-      const enqueue = vi.spyOn(KeyedAsyncQueue.prototype, "enqueue");
-      const refreshCredential = vi.fn<() => Promise<OAuthCredential>>(async () => {
-        await release.promise;
-        throw Object.assign(new Error("synthetic token endpoint unavailable"), {
-          oauthRefreshFailure: { status, retryable: true },
+      // oxlint-disable-next-line typescript/unbound-method -- Called with the original queue receiver.
+      const enqueue = KeyedAsyncQueue.prototype.enqueue;
+      let admissionIndex = 0;
+      vi.spyOn(KeyedAsyncQueue.prototype, "enqueue").mockImplementation(function (
+        this: InstanceType<typeof KeyedAsyncQueue>,
+        key,
+        task,
+        hooks,
+      ) {
+        return enqueue.call(this, key, task, {
+          ...hooks,
+          onEnqueue() {
+            hooks?.onEnqueue?.();
+            admissions[admissionIndex++]?.resolve();
+          },
         });
       });
+      const failure = () =>
+        Object.assign(new Error("synthetic token endpoint unavailable"), {
+          oauthRefreshFailure: { status, retryable: true },
+        });
+      const refreshCredential = vi
+        .fn<(input: OAuthCredential) => Promise<OAuthCredential>>()
+        .mockImplementationOnce(async () => {
+          await release.promise;
+          throw failure();
+        })
+        .mockImplementationOnce(async () => {
+          secondEntered.resolve();
+          await releaseSecond.promise;
+          throw failure();
+        })
+        .mockRejectedValueOnce(failure());
       mockOAuthProviderOperations({ refreshCredential });
       const manager = createOAuthManager();
-      const resolve = () =>
+      const resolve = (dir: string) =>
         manager.resolveOAuthAccess({
-          store: ensureAuthProfileStoreWithoutExternalProfiles(agentDir),
+          store: ensureAuthProfileStoreWithoutExternalProfiles(dir),
           profileId,
           credential,
-          agentDir,
+          agentDir: dir,
         });
-      const pending = Promise.allSettled([resolve(), resolve(), resolve()]);
+      const requests: Promise<unknown>[] = [];
       settleCaseWork = async () => {
         release.resolve();
-        await pending;
+        releaseSecond.resolve();
+        await Promise.allSettled(requests);
       };
-      await vi.waitFor(() => expect(enqueue).toHaveBeenCalledTimes(3), { timeout: 30_000 });
+      // The second path has identical bytes. The final first-path waiter will see
+      // a newer expired generation, installed while the second provider call is held.
+      const start = (dir: string) => {
+        const request = resolve(dir).catch((error: unknown) => error);
+        requests.push(request);
+        return request;
+      };
+      const first = start(firstDir);
+      await admissions[0].promise;
+      const same = start(firstDir);
+      await admissions[1].promise;
+      const other = start(secondDir);
+      await admissions[2].promise;
+      const next = start(firstDir);
+      await admissions[3].promise;
       release.resolve();
-      const results = await pending;
-      expect(results).toEqual(
-        Array.from({ length: 3 }, () => ({
-          status: "rejected",
-          reason: expect.objectContaining({ retryable: true }),
-        })),
-      );
-      expect(refreshCredential).toHaveBeenCalledTimes(1);
-      expect(loadPersistedAuthProfileStore(agentDir)?.profiles[profileId]).toEqual(credential);
-      refreshCredential.mockResolvedValueOnce(refreshed);
-      await expect(resolve()).resolves.toMatchObject({ apiKey: refreshed.access });
+      await Promise.race([
+        secondEntered.promise,
+        other.then(() => {
+          throw new Error("different path did not reach the provider");
+        }),
+      ]);
+      expect(await first).toMatchObject({ retryable: true });
+      expect(await same).toMatchObject({ retryable: true });
       expect(refreshCredential).toHaveBeenCalledTimes(2);
+      // The active second-path claim also fences its matching peer; a newer login must survive its rollback.
+      saveAuthProfileStore({ version: 1, profiles: { [profileId]: nextGeneration } }, firstDir);
+      releaseSecond.resolve();
+      expect(await other).toMatchObject({ retryable: true });
+      expect(await next).toMatchObject({ retryable: true });
+      expect(refreshCredential.mock.calls.map(([input]) => input)).toEqual([
+        credential,
+        credential,
+        nextGeneration,
+      ]);
+      expect(loadPersistedAuthProfileStore(firstDir)?.profiles[profileId]).toEqual(nextGeneration);
+      expect(loadPersistedAuthProfileStore(secondDir)?.profiles[profileId]).toEqual(credential);
+      refreshCredential.mockResolvedValueOnce(refreshed);
+      await expect(resolve(firstDir)).resolves.toMatchObject({ apiKey: refreshed.access });
+      expect(refreshCredential).toHaveBeenCalledTimes(4);
     },
   );
 
