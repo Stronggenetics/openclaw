@@ -1,6 +1,10 @@
+import { asDateTimestampMs } from "@openclaw/normalization-core/number-coercion";
 import type { OpenClawConfig } from "../../config/types.openclaw.js";
-import { toErrorObject } from "../../infra/errors.js";
+import { formatErrorMessage, toErrorObject } from "../../infra/errors.js";
+import { isUserModelAuthProfileId } from "../../state/user-model-account-id.js";
 import { continueAuthProfileAuthorization } from "./authorization-lifetime.js";
+import { authProfilesLog } from "./constants.js";
+import { hasUsableOAuthCredential } from "./credential-state.js";
 import { buildOAuthApiKey } from "./oauth-provider-operations.js";
 import { appendOAuthRefreshCleanupErrors } from "./oauth-refresh-failure.js";
 import { isExactOAuthCredential } from "./oauth-refresh-fence.js";
@@ -8,9 +12,14 @@ import { createFailedOAuthRefreshFence } from "./oauth-refresh-marker.js";
 import type { beginOAuthRefreshObservation } from "./oauth-refresh-observation.js";
 import { rollbackOAuthRefreshPeerClaims } from "./oauth-refresh-peers.js";
 import type { OAuthRefreshPeerClaim } from "./oauth-refresh-peers.js";
-import { hasMatchingOAuthIdentity, isSafeOAuthPostClaimSettlement } from "./oauth-shared.js";
+import {
+  hasMatchingOAuthIdentity,
+  isSafeOAuthPostClaimSettlement,
+  isSafeToAdoptMainStoreOAuthIdentity,
+} from "./oauth-shared.js";
 import type { PersonalAuthProfileStore } from "./personal-store.js";
 import {
+  ensureAuthProfileStoreWithoutExternalProfilesAsync,
   loadAuthProfileStoreWithoutExternalProfilesAsync,
   updateAuthProfileStoreWithLock,
 } from "./store-runtime.js";
@@ -60,6 +69,42 @@ export function canReuseOAuthCredentialAfterRefreshFailure(params: {
       params.attempted.access !== params.candidate.access &&
       hasMatchingOAuthIdentity(params.attempted, params.candidate))
   );
+}
+
+export async function adoptNewerMainOAuthCredential(params: {
+  profileId: string;
+  agentDir?: string;
+  credential: OAuthCredential;
+}): Promise<OAuthCredential | null> {
+  if (!params.agentDir || isUserModelAuthProfileId(params.profileId)) {
+    return null;
+  }
+  try {
+    const mainStore = await ensureAuthProfileStoreWithoutExternalProfilesAsync(undefined, {
+      allowKeychainPrompt: false,
+    });
+    const mainCred = mainStore.profiles[params.profileId];
+    if (mainCred?.type !== "oauth") {
+      return null;
+    }
+    const mainExpires = asDateTimestampMs(mainCred.expires);
+    const localExpires = asDateTimestampMs(params.credential.expires);
+    if (
+      mainCred.provider === params.credential.provider &&
+      hasUsableOAuthCredential(mainCred) &&
+      mainExpires !== undefined &&
+      (localExpires === undefined || mainExpires > localExpires) &&
+      isSafeToAdoptMainStoreOAuthIdentity(params.credential, mainCred)
+    ) {
+      return mainCred;
+    }
+  } catch (err) {
+    authProfilesLog.debug("adoptNewerMainOAuthCredential failed", {
+      profileId: params.profileId,
+      error: formatErrorMessage(err),
+    });
+  }
+  return null;
 }
 
 export async function loadStoredOAuthRefreshStore(

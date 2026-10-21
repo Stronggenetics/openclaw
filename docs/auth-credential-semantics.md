@@ -217,7 +217,9 @@ known transport failure or timeout before any response, connection reset, or a
 token-endpoint 429/5xx response. Unknown exceptions, unreadable successful
 responses, invalid returned credentials (including a missing `access_token`), and
 explicit token rejection remain terminal. A caller timeout does not roll back or
-retry an in-flight owner. The auth-candidate caller owns health recording and the
+retry an in-flight owner. Callers already queued for the same owner and exact
+credential share a settled transient failure instead of replaying that attempt;
+a later new admission can retry. The auth-candidate caller owns health recording and the
 normal bounded transient cooldown (initially 30 seconds, at most five minutes);
 read-only runs and local failure policy never persist shared health updates.
 
@@ -234,7 +236,11 @@ the write transaction; empty agent stores do not block a shared-store refresh.
 If peer fencing fails before the provider refresh starts, claimed credentials
 are restored. After a native profile refresh finishes with an admitted retryable
 failure, exact owner and peer claims are restored only under current credential
-and caller authority, without replacing a newer login. A lost response
+and caller authority, without replacing a newer login. Personal-account rollback
+retains both the account locator and its current canonical owner's selection
+authority across profile merges. Disconnecting or switching that owner's default
+account during refresh prevents restoration; this does not revoke otherwise valid
+explicit session pins. A lost response
 may already have consumed a rotating refresh token: recovery is best effort,
 and a subsequent definitive rejection still requires authentication. Invalid
 returned credentials and post-success settlement failures remain fail-closed.

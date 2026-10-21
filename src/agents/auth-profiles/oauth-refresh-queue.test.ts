@@ -7,7 +7,6 @@ import { createDeferredCore } from "../../shared/deferred.js";
 import { captureEnv } from "../../test-utils/env.js";
 import { getOAuthProviderRuntimeMocks } from "./oauth-common-mocks.test-support.js";
 import "./oauth-external-auth-passthrough.test-support.js";
-import "./oauth-file-lock-passthrough.test-support.js";
 import { createOAuthManager } from "./oauth-manager.js";
 import { mockOAuthProviderOperations } from "./oauth-native-provider.test-support.js";
 import { isOAuthRefreshFence, isPendingOAuthRefreshFence } from "./oauth-refresh-marker.js";
@@ -146,6 +145,60 @@ describe("OAuth refresh failure ownership", () => {
     expect(callCount).toBe(1);
     expect(results.filter((result) => result === null)).toHaveLength(1);
   });
+
+  it.each([429, 503])(
+    "shares a transient %s failure with already queued callers only",
+    async (status) => {
+      const profileId = "xai:cohort";
+      const credential: OAuthCredential = {
+        type: "oauth",
+        provider: "xai",
+        access: "synthetic-cohort-access",
+        refresh: "synthetic-cohort-refresh",
+        expires: 1,
+      };
+      const refreshed = { ...credential, access: "rotated-access", expires: Date.now() + 600_000 };
+      saveAuthProfileStore({ version: 1, profiles: { [profileId]: credential } }, agentDir);
+      const release = createDeferredCore();
+      // Shared fixture setup resets module identity; observe the manager's current queue module.
+      const { KeyedAsyncQueue } = await import("../../plugin-sdk/keyed-async-queue.js");
+      const enqueue = vi.spyOn(KeyedAsyncQueue.prototype, "enqueue");
+      const refreshCredential = vi.fn<() => Promise<OAuthCredential>>(async () => {
+        await release.promise;
+        throw Object.assign(new Error("synthetic token endpoint unavailable"), {
+          oauthRefreshFailure: { status, retryable: true },
+        });
+      });
+      mockOAuthProviderOperations({ refreshCredential });
+      const manager = createOAuthManager();
+      const resolve = () =>
+        manager.resolveOAuthAccess({
+          store: ensureAuthProfileStoreWithoutExternalProfiles(agentDir),
+          profileId,
+          credential,
+          agentDir,
+        });
+      const pending = Promise.allSettled([resolve(), resolve(), resolve()]);
+      settleCaseWork = async () => {
+        release.resolve();
+        await pending;
+      };
+      await vi.waitFor(() => expect(enqueue).toHaveBeenCalledTimes(3), { timeout: 30_000 });
+      release.resolve();
+      const results = await pending;
+      expect(results).toEqual(
+        Array.from({ length: 3 }, () => ({
+          status: "rejected",
+          reason: expect.objectContaining({ retryable: true }),
+        })),
+      );
+      expect(refreshCredential).toHaveBeenCalledTimes(1);
+      expect(loadPersistedAuthProfileStore(agentDir)?.profiles[profileId]).toEqual(credential);
+      refreshCredential.mockResolvedValueOnce(refreshed);
+      await expect(resolve()).resolves.toMatchObject({ apiKey: refreshed.access });
+      expect(refreshCredential).toHaveBeenCalledTimes(2);
+    },
+  );
 
   it("cancels auth waiters while the canonical refresh owner durably settles for another caller", async () => {
     const profileId = "xai:default";

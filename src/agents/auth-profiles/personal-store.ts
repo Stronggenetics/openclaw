@@ -19,6 +19,7 @@ import {
   registerUserModelAuthProfileSecrets,
 } from "../../state/user-model-accounts.js";
 import { captureUserProfileModelAccountLinksAuthority } from "../../state/user-profile-events.js";
+import { prepareUserProfileCatalog } from "../../state/user-profile-list.js";
 import { AUTH_STORE_VERSION } from "./constants.js";
 import { observeCanonicalAuthProfileCredentials } from "./credential-observation.js";
 import { assertPersonalAuthProfileRuntime } from "./runtime-scope.js";
@@ -34,7 +35,7 @@ export type PersonalAuthProfileStore = {
   read(): Promise<AuthProfileStore>;
   readCurrentCredential(this: void): AuthProfileCredential | undefined;
   /** A retry may not revive a grant whose account selection changed during provider work. */
-  captureRefreshAuthority(): () => void;
+  captureRefreshAuthority(): Promise<() => void>;
   update(
     updater: (store: AuthProfileStore) => boolean,
     assertCurrent?: () => void,
@@ -97,20 +98,42 @@ export function withPersonalAuthProfileStore<T>(
             throw new Error("Personal model account credential has not been prepared");
           },
           read: async () => asStore(await readProfile()),
-          captureRefreshAuthority() {
+          async captureRefreshAuthority() {
             const locator = parseUserModelAuthProfileId(profileId);
             if (!locator) {
               throw new Error("Personal refresh requires an exact account ID");
             }
-            const current = captureUserProfileModelAccountLinksAuthority(
+            // Account IDs keep their original locator after a canonical profile merge.
+            const locatorCurrent = captureUserProfileModelAccountLinksAuthority(
               context.admission,
               locator.ownerProfileId,
             );
-            return () => {
-              if (!current()) {
-                throw new Error("Personal model account selection changed during refresh");
+            const catalog = await prepareUserProfileCatalog({
+              path: context.admission.databasePath,
+              env: context.environment,
+            });
+            try {
+              const canonical = catalog.readCurrentIdentity(locator.ownerProfileId);
+              if (!canonical) {
+                throw new Error("Personal refresh requires a current account owner");
               }
-            };
+              const canonicalCurrent =
+                canonical.profileId === locator.ownerProfileId
+                  ? locatorCurrent
+                  : captureUserProfileModelAccountLinksAuthority(
+                      context.admission,
+                      canonical.profileId,
+                    );
+              const assertRefreshCurrent = () => {
+                if (!locatorCurrent() || !canonicalCurrent()) {
+                  throw new Error("Personal model account selection changed during refresh");
+                }
+              };
+              assertRefreshCurrent();
+              return assertRefreshCurrent;
+            } finally {
+              catalog.release();
+            }
           },
           async update(updater, assertUpdateCurrent) {
             const expected = await readProfile();

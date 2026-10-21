@@ -26,6 +26,7 @@ import {
   clearUserProfileAuthLink,
   connectUserModelAccount,
   readSelectedUserModelAccount,
+  setUserProfileAuthLink,
   updateUserModelAuthProfile,
   readUserModelAuthProfile,
 } from "../../state/user-model-accounts.js";
@@ -715,3 +716,87 @@ it.for(["disconnect", "reassignment", "same-account-reassignment"] as const)(
     }
   },
 );
+
+it.for(["disconnect", "link-switch", "merge"] as const)(
+  "does not revive a merged owner's grant after transient %s",
+  async (change, { owner, profileId, credential, replacement }) => {
+    const target = ensureProfileForEmail("personal-refresh-merged@example.test");
+    const other = connectUserModelAccount({
+      ownerProfileId: target.id,
+      credential: { ...replacement, accountId: "other-existing-account" },
+      assertCurrent() {},
+    });
+    await mergeCanonicalUserProfiles(owner.id, target.id);
+    setUserProfileAuthLink({
+      profileId: target.id,
+      provider: credential.provider,
+      authProfileId: profileId,
+    });
+    const entered = createDeferredCore();
+    const release = createDeferredCore();
+    const refreshCredential = vi.fn(async () => {
+      entered.resolve();
+      await release.promise;
+      throw Object.assign(new Error("synthetic endpoint unavailable"), {
+        oauthRefreshFailure: { retryable: true, status: 503 },
+      });
+    });
+    const buildApiKey = vi.fn(async () => "should-not-publish");
+    const manager = managerWith({ refreshCredential, buildApiKey });
+    const pending = resolve(manager, profileId, credential).catch((error: unknown) => error);
+    try {
+      await entered.promise;
+      const fenced = readUserModelAuthProfile(profileId)?.credential;
+      expect(fenced?.type === "oauth" && isPendingOAuthRefreshFence(fenced)).toBe(true);
+      if (change === "disconnect") {
+        clearUserProfileAuthLink({ profileId: target.id, provider: credential.provider });
+      } else if (change === "link-switch") {
+        setUserProfileAuthLink({
+          profileId: target.id,
+          provider: credential.provider,
+          authProfileId: other.authProfileId,
+        });
+      } else {
+        const successor = ensureProfileForEmail("personal-refresh-successor@example.test");
+        await mergeCanonicalUserProfiles(target.id, successor.id);
+      }
+      // Changing only selection/ownership must not replace the old credential row.
+      expect(readUserModelAuthProfile(profileId)?.credential).toEqual(fenced);
+      release.resolve();
+      expect(await pending).toBeInstanceOf(Error);
+      const stored = readUserModelAuthProfile(profileId)?.credential;
+      const oauth = stored?.type === "oauth" ? stored : undefined;
+      expect(isOAuthRefreshFence(oauth)).toBe(true);
+      expect(isPendingOAuthRefreshFence(oauth)).toBe(false);
+      expect(buildApiKey).not.toHaveBeenCalled();
+      expect(refreshCredential).toHaveBeenCalledTimes(1);
+      expect(readUserModelAuthProfile(other.authProfileId)?.credential).toEqual({
+        ...replacement,
+        accountId: "other-existing-account",
+      });
+    } finally {
+      release.resolve();
+      await pending;
+    }
+  },
+);
+
+it("does not persist a refresh claim when personal authority capture fails", async ({
+  profileId,
+  credential,
+}) => {
+  const refreshCredential = vi.fn();
+  const manager = managerWith({ refreshCredential });
+  const failure = new Error("synthetic refresh authority unavailable");
+  await withPersonalAuthProfileStore(profileId, async (owner) => {
+    await owner.read();
+    vi.spyOn(owner, "captureRefreshAuthority").mockImplementation(() => {
+      throw failure;
+    });
+    await expect(resolve(manager, profileId, credential, { personalStore: owner })).rejects.toThrow(
+      failure.message,
+    );
+    expect(readUserModelAuthProfile(profileId)?.credential).toEqual(credential);
+    expect(refreshCredential).not.toHaveBeenCalled();
+  });
+});
