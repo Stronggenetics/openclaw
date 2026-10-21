@@ -217,14 +217,26 @@ only with positive evidence that dispatch never began, a documented
 provider-specific guarantee that the grant remains reusable, or an explicit
 owner-accepted provider retry policy. A missing response, connection reset,
 timeout after dispatch, or arbitrary 429/5xx response does not prove
-nonconsumption. xAI is the only owner-accepted retry policy: an HTTP 429 or 5xx
-token response keeps the stored sign-in and a later refresh retries it, which
-preserves xAI's prior refresh behavior. This includes transient or unrecognized
-OAuth `error` codes such as `temporarily_unavailable`. Final OAuth errors, such
-as `invalid_grant`, `invalid_client` or `invalid_request`, stay terminal at any
-status. Lost responses, timeouts and unreadable responses stay fenced. Unknown exceptions, unreadable
-successful responses, invalid returned credentials (including a missing
-`access_token`), and explicit token rejection remain terminal. A caller timeout does not roll back or
+nonconsumption by itself.
+
+- Google (managed Meet accounts and Vertex `authorized_user` ADC) and Microsoft
+  (Teams delegated accounts) document their refresh grants as reusable. A lost
+  or unreadable response, a timeout after dispatch, and an HTTP 429 or 5xx,
+  including an HTML error page, keep the sign-in for a later refresh.
+- xAI is the only owner-accepted retry policy. This changes earlier behavior,
+  where an xAI 429 or 5xx was terminal. An HTTP 429 or 5xx token response now
+  keeps the stored sign-in and a later refresh retries it, including transient
+  or unrecognized OAuth `error` codes such as `temporarily_unavailable`. A lost
+  or unreadable xAI response stays fenced.
+- OpenAI, Anthropic, GitHub, X, MCP, Chutes, MiniMax, Radius and Twitch rotate
+  grants or do not document reuse. A lost or unreadable response, timeout
+  after dispatch or post-dispatch 429/5xx stays fenced and asks for reconnect.
+
+Final OAuth errors, such as `invalid_grant`, `invalid_client` or
+`invalid_request`, stay terminal at any status for every owner. Unknown
+exceptions, invalid returned credentials (including a missing `access_token` or
+an invalid replacement refresh token), and explicit token rejection remain
+terminal. A caller timeout does not roll back or
 retry an in-flight owner. Callers already queued for the same owner and exact
 credential share a settled transient failure instead of replaying that attempt;
 a later new admission can retry. The auth-candidate caller owns health recording and the
@@ -303,7 +315,9 @@ throw createOAuthRefreshError(
 Use that evidence only when the adapter actually knows no request began. Merely
 catching a fetch rejection before headers is insufficient. Response-level
 `unchanged` outcomes require a documented guarantee for that route and grant;
-status alone is not evidence. Nested terminal OAuth reasons override recovery
+status alone is not evidence. `owner-accepted-provider-retry` is not a reuse
+guarantee: claim it only after an explicit product decision by that provider's
+owner, because the classifier cannot verify it. Nested terminal OAuth reasons override recovery
 hints. Unknown versions, contradictory facts, malformed success, and errors
 after successful exchange cannot authorize restoration. Legacy
 `oauthRefreshFailure.retryable` booleans remain presentation metadata but no
@@ -356,12 +370,15 @@ existing credential owner:
 - GitHub accounts: reconnect the affected shared or personal connection through
   its existing account setup, preserving the intended account identity.
 - Twitch: reauthorize the configured bot account and replace its configured
-  access/refresh grant together. Do not clear plugin state to replay the old
+  access/refresh grant together. This includes a Twitch 429/5xx or lost refresh
+  response, because Twitch does not document reuse of the old grant after a
+  possibly completed rotation. Do not clear plugin state to replay the old
   refresh token. A saved completed rotation retries only identity validation;
   it does not repeat the token exchange.
 
 Google Meet and Microsoft delegated grants retain their documented reusable
-refresh material for later recovery, but explicit rejection still requires
+refresh material for later recovery, including after a lost, unreadable or HTML
+error response, but explicit rejection still requires
 reauthorization. Vertex ADC remains under its external credential owner. No
 recovery procedure should copy a different person’s grant or edit live SQLite
 rows manually.

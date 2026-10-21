@@ -114,13 +114,23 @@ async function fetchMSTeamsTokens(params: {
       if (!params.refresh) {
         throw cause;
       }
+      // Microsoft documents the refresh grant as reusable: an HTML error page or unreadable body is
+      // no rejection, so status alone decides, and a lost success body equals a lost response.
+      if (!response.ok) {
+        throw createOAuthRefreshResponseError(
+          "MSTeams token refresh",
+          response.status,
+          undefined,
+          "documented-reusable-grant",
+        );
+      }
       throw createOAuthRefreshError(
         "MSTeams refresh response could not be read",
         {
           version: 1,
-          phase: "after-token-response",
-          outcome: "unknown",
-          status: response.status,
+          phase: "token-response",
+          outcome: "unchanged",
+          recovery: { kind: "later", evidence: "documented-reusable-grant" },
         },
         { cause },
       );

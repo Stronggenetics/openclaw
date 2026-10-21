@@ -254,7 +254,7 @@ async function requestXaiOAuthRefresh(
         body.json,
         code && XAI_FINAL_OAUTH_ERRORS.has(code) ? undefined : "owner-accepted-provider-retry",
       );
-      // An unverified HTML response remains an uncertain exchange, not permission to replay.
+      // HTML is not OAuth JSON; the status above decides recovery and this only adds a hint.
       if (
         !asOptionalRecord(body.json)?.error &&
         (response.headers.get("cf-mitigated") === "challenge" ||

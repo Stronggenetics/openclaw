@@ -67,6 +67,14 @@ export function buildGoogleMeetAuthUrl(params: {
   return `${GOOGLE_MEET_AUTH_URL}?${search.toString()}`;
 }
 
+type GoogleTokenPayload = {
+  access_token?: string;
+  expires_in?: number;
+  refresh_token?: string;
+  scope?: string;
+  token_type?: string;
+};
+
 async function executeGoogleTokenRequest(body: URLSearchParams) {
   const refreshing = body.get("grant_type") === "refresh_token";
   let dispatched = false;
@@ -113,13 +121,38 @@ async function executeGoogleTokenRequest(body: URLSearchParams) {
       const detail = await readGoogleApiErrorDetail(response);
       throw new Error(`Google OAuth token request failed (${response.status}): ${detail}`);
     }
-    const payload = await readProviderJsonResponse<{
-      access_token?: string;
-      expires_in?: number;
-      refresh_token?: string;
-      scope?: string;
-      token_type?: string;
-    }>(response, "Google OAuth token", { maxBytes: GOOGLE_OAUTH_TOKEN_JSON_MAX_BYTES });
+    let payload: GoogleTokenPayload;
+    try {
+      payload = await readProviderJsonResponse<GoogleTokenPayload>(response, "Google OAuth token", {
+        maxBytes: GOOGLE_OAUTH_TOKEN_JSON_MAX_BYTES,
+      });
+    } catch (cause) {
+      if (!refreshing) {
+        throw cause;
+      }
+      // Google documents the refresh grant as reusable: an HTML error page or unreadable body is
+      // no rejection, so status alone decides, and a lost success body equals a lost response.
+      if (!response.ok) {
+        throw createOAuthRefreshResponseError(
+          "Google Meet OAuth refresh",
+          response.status,
+          undefined,
+          "documented-reusable-grant",
+        );
+      }
+      throw createOAuthRefreshError(
+        cause instanceof Error && cause.message.startsWith("Google OAuth token:")
+          ? cause.message
+          : "Google Meet OAuth refresh response could not be read",
+        {
+          version: 1,
+          phase: "token-response",
+          outcome: "unchanged",
+          recovery: { kind: "later", evidence: "documented-reusable-grant" },
+        },
+        { cause },
+      );
+    }
     if (refreshing && (!response.ok || readOAuthRefreshErrorReason(payload))) {
       throw createOAuthRefreshResponseError(
         "Google Meet OAuth refresh",

@@ -142,7 +142,7 @@ describe("Teams actual delegated HTTP parser and SQLite owner", () => {
     expect(await loadMSTeamsDelegatedTokens(params.accountId)).toBeUndefined();
   });
 
-  it.each(["lost-response", "503", "crash"])(
+  it.each(["lost-response", "503", "html-503", "unreadable-body", "crash"])(
     "recovers the reusable Microsoft grant after %s",
     async (mode) => {
       if (mode === "crash") {
@@ -160,6 +160,22 @@ describe("Teams actual delegated HTTP parser and SQLite owner", () => {
         if (network.mock.calls.length === 1 && mode !== "crash") {
           if (mode === "lost-response") {
             throw new TypeError("synthetic lost response");
+          }
+          if (mode === "html-503") {
+            return new Response("<html>upstream unavailable</html>", {
+              status: 503,
+              headers: { "content-type": "text/html" },
+            });
+          }
+          if (mode === "unreadable-body") {
+            return new Response(
+              new ReadableStream({
+                pull(controller) {
+                  controller.error(new Error("synthetic body reset"));
+                },
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
           }
           return Response.json({ error: "temporarily_unavailable" }, { status: 503 });
         }

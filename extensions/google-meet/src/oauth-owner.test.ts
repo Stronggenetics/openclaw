@@ -146,7 +146,7 @@ it.each(["nested-invalid-grant"] as const)(
     expect(network).toHaveBeenCalledOnce();
   },
 );
-it.each(["lost-response", "503"])(
+it.each(["lost-response", "503", "html-503", "unreadable-body"])(
   "recovers the reusable Google grant after %s and reopening storage",
   async (mode) => {
     const network = vi.fn<typeof fetch>(async (url, init) => {
@@ -154,6 +154,22 @@ it.each(["lost-response", "503"])(
       if (network.mock.calls.length === 1) {
         if (mode === "lost-response") {
           throw new TypeError("synthetic lost response");
+        }
+        if (mode === "html-503") {
+          return new Response("<html>upstream unavailable</html>", {
+            status: 503,
+            headers: { "content-type": "text/html" },
+          });
+        }
+        if (mode === "unreadable-body") {
+          return new Response(
+            new ReadableStream({
+              pull(controller) {
+                controller.error(new Error("synthetic body reset"));
+              },
+            }),
+            { status: 200, headers: { "content-type": "application/json" } },
+          );
         }
         return Response.json({ error: "temporarily_unavailable" }, { status: 503 });
       }
