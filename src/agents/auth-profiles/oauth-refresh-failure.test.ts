@@ -305,6 +305,24 @@ it.each([
     true,
   ],
   [
+    "owner-accepted provider retry",
+    withOutcome({
+      ...documentedUnchanged,
+      status: 429,
+      recovery: { kind: "later", evidence: "owner-accepted-provider-retry" },
+    }),
+    true,
+  ],
+  [
+    "owner-accepted provider retry cannot admit a client rejection",
+    withOutcome({
+      ...documentedUnchanged,
+      status: 401,
+      recovery: { kind: "later", evidence: "owner-accepted-provider-retry" },
+    }),
+    false,
+  ],
+  [
     "verified intermediary challenge",
     withOutcome({
       ...documentedUnchanged,

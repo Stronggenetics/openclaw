@@ -20,6 +20,7 @@ export type OAuthRefreshOutcome = {
         evidence:
           | "documented-nonconsuming-rejection"
           | "documented-reusable-grant"
+          | "owner-accepted-provider-retry"
           | "verified-intermediary-challenge";
       };
     }
@@ -115,12 +116,16 @@ export function createOAuthRefreshError(
   });
 }
 
-/** Reuse evidence must come from the provider owner, never from status alone. */
+/**
+ * Reuse evidence must come from the provider owner, never from status alone.
+ * `owner-accepted-provider-retry` is a provider-specific product decision, not a
+ * documented reuse guarantee; only the named provider adapter may claim it.
+ */
 export function createOAuthRefreshResponseError(
   context: string,
   status: number,
   payload: unknown,
-  evidence?: "documented-reusable-grant",
+  evidence?: "documented-reusable-grant" | "owner-accepted-provider-retry",
 ): ReturnType<typeof createOAuthRefreshError> {
   const reason = readOAuthRefreshErrorReason(payload);
   const record = asOptionalRecord(payload);
@@ -201,7 +206,8 @@ export function isRecoverableOAuthRefreshFailure(error: unknown): boolean {
           facts.status === 429 ||
           (typeof facts.status === "number" && facts.status >= 500)) &&
         (recovery?.evidence === "documented-nonconsuming-rejection" ||
-          recovery?.evidence === "documented-reusable-grant")) ||
+          recovery?.evidence === "documented-reusable-grant" ||
+          recovery?.evidence === "owner-accepted-provider-retry")) ||
       (verifiedChallenge && facts === challenge);
     if (recovery?.kind !== "later" || (!notAttempted && !unchanged)) {
       return false;

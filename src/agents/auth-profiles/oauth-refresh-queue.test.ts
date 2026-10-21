@@ -163,6 +163,13 @@ describe("OAuth refresh failure ownership", () => {
       outcome: "unchanged",
       recovery: { kind: "later", evidence: "documented-reusable-grant" },
     },
+    {
+      version: 1,
+      phase: "token-response",
+      outcome: "unchanged",
+      status: 503,
+      recovery: { kind: "later", evidence: "owner-accepted-provider-retry" },
+    },
   ])(
     "shares a positively safe $phase failure only with queued callers for the same path and generation",
     async (facts) => {

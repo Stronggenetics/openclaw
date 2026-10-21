@@ -208,6 +208,44 @@ describe("xAI OAuth", () => {
   });
 
   it.each([
+    [429, () => jsonResponse({}, 429)],
+    [
+      503,
+      () =>
+        new Response("<html>upstream unavailable</html>", {
+          status: 503,
+          headers: { "content-type": "text/html" },
+        }),
+    ],
+    [500, () => new Response(null, { status: 500 })],
+  ])(
+    "keeps the stored sign-in after a plain HTTP %s so a later refresh succeeds",
+    async (status, response) => {
+      fetchImpl.mockResolvedValueOnce(response());
+      const error = await refresh().catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(Error);
+      expect(error).toMatchObject({
+        oauthRefreshOutcome: {
+          version: 1,
+          phase: "token-response",
+          outcome: "unchanged",
+          status,
+          recovery: { kind: "later", evidence: "owner-accepted-provider-retry" },
+        },
+      });
+      expect(isRecoverableOAuthRefreshFailure(error)).toBe(true);
+      mockResponses(
+        jsonResponse({ access_token: "access-2", refresh_token: "refresh-2", expires_in: 3600 }),
+      );
+      await expect(refresh()).resolves.toMatchObject({ access: "access-2", refresh: "refresh-2" });
+      expect(fetchImpl).toHaveBeenCalledTimes(2);
+      for (const [, init] of fetchImpl.mock.calls) {
+        expectPost(init, { grant_type: "refresh_token", refresh_token: "refresh-1" });
+      }
+    },
+  );
+
+  it.each([
     [503, { error: "temporarily_unavailable" }, "unknown"],
     [429, { error: "rate_limited" }, "unknown"],
     [401, { error: "invalid_grant" }, "rejected"],

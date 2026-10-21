@@ -238,7 +238,16 @@ async function requestXaiOAuthRefresh(
       );
     }
     if (!response.ok || asOptionalRecord(body.json)?.error !== undefined) {
-      const error = createOAuthRefreshResponseError(context, response.status, body.json);
+      const structured = asOptionalRecord(body.json)?.error !== undefined;
+      // Jason's 2026-10-21 product decision for xAI (PR #178646): a plain 429/5xx
+      // keeps the stored sign-in for a later refresh. xAI does not document grant
+      // reuse, so structured OAuth errors and lost or unreadable responses stay fenced.
+      const error = createOAuthRefreshResponseError(
+        context,
+        response.status,
+        body.json,
+        structured ? undefined : "owner-accepted-provider-retry",
+      );
       // An unverified HTML response remains an uncertain exchange, not permission to replay.
       if (
         !asOptionalRecord(body.json)?.error &&
