@@ -27,8 +27,8 @@ function lineageOf(oauth: OAuthConfig): string {
     oauth.expiresAt,
   ]);
   // The lineage detects a changed configured grant; it is not password storage
-  // or credential verification.
-  // codeql[js/insufficient-password-hash]
+  // or credential verification. It is persisted with the owned credential, so it
+  // must stay stable across restarts.
   return createHash("sha256").update(grant).digest("hex");
 }
 
