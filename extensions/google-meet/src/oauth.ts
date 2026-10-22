@@ -50,14 +50,12 @@ export function buildGoogleMeetAuthUrl(params: {
   clientId: string;
   challenge: string;
   state: string;
-  redirectUri?: string;
-  scopes?: readonly string[];
 }): string {
   const search = new URLSearchParams({
     client_id: params.clientId,
     response_type: "code",
-    redirect_uri: params.redirectUri ?? GOOGLE_MEET_REDIRECT_URI,
-    scope: (params.scopes ?? GOOGLE_MEET_SCOPES).join(" "),
+    redirect_uri: GOOGLE_MEET_REDIRECT_URI,
+    scope: GOOGLE_MEET_SCOPES.join(" "),
     code_challenge: params.challenge,
     code_challenge_method: "S256",
     access_type: "offline",
@@ -214,7 +212,6 @@ export async function exchangeGoogleMeetAuthCode(params: {
   clientSecret?: string;
   code: string;
   verifier: string;
-  redirectUri?: string;
 }) {
   return await executeGoogleTokenRequest(
     tokenRequestBody({
@@ -222,7 +219,7 @@ export async function exchangeGoogleMeetAuthCode(params: {
       client_secret: params.clientSecret,
       code: params.code,
       grant_type: "authorization_code",
-      redirect_uri: params.redirectUri ?? GOOGLE_MEET_REDIRECT_URI,
+      redirect_uri: GOOGLE_MEET_REDIRECT_URI,
       code_verifier: params.verifier,
     }),
   );
