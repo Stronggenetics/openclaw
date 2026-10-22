@@ -263,7 +263,7 @@ describe("real MCP SDK token HTTP and durable owner", () => {
       const waiter = resolveMcpOAuthAccessToken({ identity, fetchFn, signal: controller.signal });
       controller.abort();
       // Rejects while the holder still owns the lease.
-      await expect(waiter).rejects.toMatchObject({ name: "AbortError" });
+      await expect(waiter).rejects.toMatchObject({ code: "OPENCLAW_STATE_LEASE_ABORTED" });
       release.resolve();
       await expect(holder).resolves.toBe("synthetic-new-access");
       expect(fetchFn).toHaveBeenCalledTimes(1);

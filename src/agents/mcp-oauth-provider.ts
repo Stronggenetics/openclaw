@@ -178,6 +178,7 @@ export async function createMcpOAuthClientProvider(params: {
         params.login.assertCurrent();
         if (
           store.tokens?.access_token &&
+          !store.refreshClaim &&
           store.pendingAuthorizationChallenge?.requiresAuthorization !== true &&
           (store.tokenExpiresAt === undefined || store.tokenExpiresAt > Date.now())
         ) {
