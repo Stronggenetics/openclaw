@@ -6,9 +6,18 @@ import { resetPluginStateStoreForTests } from "openclaw/plugin-sdk/plugin-state-
 import { resolveRequestUrl } from "openclaw/plugin-sdk/request-url";
 import { closeOpenClawStateDatabaseAsync } from "openclaw/plugin-sdk/sqlite-runtime-testing";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { awaitGateBeforeSettlement } from "../../test/helpers/promise.js";
 import { resetGoogleVertexAdcState } from "./google-oauth.test-support.js";
 import { resolveGoogleVertexAuthorizedUserHeaders } from "./vertex-adc.js";
+
+// Fails fast if the refresh settles before reaching its HTTP barrier.
+function reachRefreshBarrier(entered: Promise<void>, refresh: Promise<unknown>): Promise<void> {
+  return Promise.race([
+    entered,
+    refresh.then((): never => {
+      throw new Error("refresh settled before HTTP barrier");
+    }),
+  ]);
+}
 
 let root: string;
 let adcPath: string;
@@ -63,7 +72,7 @@ it("coalesces the real form/parser and distinguishes clients even with the same 
   });
   const first = resolveGoogleVertexAuthorizedUserHeaders(network);
   try {
-    await awaitGateBeforeSettlement(entered.promise, first, "refresh settled before HTTP barrier");
+    await reachRefreshBarrier(entered.promise, first);
     const second = resolveGoogleVertexAuthorizedUserHeaders(network);
     release.resolve();
     expect(await Promise.all([first, second])).toEqual([
@@ -148,7 +157,7 @@ it("never publishes or caches an exchange after its external ADC owner is replac
   const first = resolveGoogleVertexAuthorizedUserHeaders(network);
   const outcome = first.catch((error: unknown) => error);
   try {
-    await awaitGateBeforeSettlement(entered.promise, first, "refresh settled before HTTP barrier");
+    await reachRefreshBarrier(entered.promise, first);
     writeAdc({ ...initial, refresh_token: "synthetic-new-login" });
     release.resolve();
     expect(await outcome).toBeInstanceOf(Error);

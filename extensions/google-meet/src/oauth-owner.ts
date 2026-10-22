@@ -19,17 +19,17 @@ const tasks = new WeakMap<
 >();
 
 function lineageOf(oauth: OAuthConfig): string {
-  return createHash("sha256")
-    .update(
-      JSON.stringify([
-        oauth.clientId,
-        oauth.clientSecret,
-        oauth.refreshToken,
-        oauth.accessToken,
-        oauth.expiresAt,
-      ]),
-    )
-    .digest("hex");
+  const grant = JSON.stringify([
+    oauth.clientId,
+    oauth.clientSecret,
+    oauth.refreshToken,
+    oauth.accessToken,
+    oauth.expiresAt,
+  ]);
+  // The lineage detects a changed configured grant; it is not password storage
+  // or credential verification.
+  // codeql[js/insufficient-password-hash]
+  return createHash("sha256").update(grant).digest("hex");
 }
 
 /** Config identifies the grant; this plugin-owned row owns all later rotations. */

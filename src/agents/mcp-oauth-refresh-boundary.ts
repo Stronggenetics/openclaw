@@ -131,7 +131,7 @@ export function createMcpOAuthRefreshBoundary(
         }
       };
     },
-    async finish() {
+    async finish({ redirected = false }: { redirected?: boolean } = {}) {
       if (claimed && !dispatched) {
         await mutateMcpOAuthStore(
           options,
@@ -139,7 +139,8 @@ export function createMcpOAuthRefreshBoundary(
           assertCurrent ? { assertCurrent } : undefined,
         );
       }
-      if (failure) {
+      // A started interactive sign-in replaces the grant; a dispatched claim stays fenced.
+      if (failure && !redirected) {
         throw failure;
       }
     },

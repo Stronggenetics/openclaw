@@ -309,7 +309,8 @@ export function registerMcpAuthForcedEffects(fixture: McpAuthForcedEffectFixture
         expect((await stored()).lastAuthorizationUrl).toBeDefined();
       } else {
         await finishError(await start());
-        expect(await stored()).toEqual(before);
+        // A dispatched rotating-grant refresh may have been consumed, so it stays fenced.
+        expect(await stored()).toEqual({ ...before, refreshClaim: expect.any(String) });
       }
       expect(responseBoundary).toBe(1);
       expect(requestParams?.get("grant_type")).toBe("refresh_token");

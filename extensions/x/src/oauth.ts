@@ -7,9 +7,9 @@ import {
 import { readResponseWithLimit } from "openclaw/plugin-sdk/response-limit-runtime";
 import { asOptionalRecord } from "openclaw/plugin-sdk/string-coerce-runtime";
 import { racePromiseWithAbortSignal } from "openclaw/plugin-sdk/time-runtime";
-import type { XFetch, XTokenState } from "./api.js";
-import { fetchXService } from "./fetch.js";
+import { fetchXService, type XFetch } from "./fetch.js";
 
+export type XTokenState = "idle" | "refreshing" | "ready" | "error";
 export type XRefreshClaim = {
   refreshToken: string;
   commit: (refreshToken: string) => Promise<void>;
