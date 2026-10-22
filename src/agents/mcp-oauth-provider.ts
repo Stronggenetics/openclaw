@@ -178,7 +178,9 @@ export async function createMcpOAuthClientProvider(params: {
         params.login.assertCurrent();
         if (
           store.tokens?.access_token &&
-          !store.refreshClaim &&
+          // Only an earlier attempt's fenced claim makes these tokens unusable; this attempt's own
+          // failed refresh still reports instead of starting authorization.
+          (!store.refreshClaim || store.refreshClaim === params.refreshBoundary?.claim) &&
           store.pendingAuthorizationChallenge?.requiresAuthorization !== true &&
           (store.tokenExpiresAt === undefined || store.tokenExpiresAt > Date.now())
         ) {
