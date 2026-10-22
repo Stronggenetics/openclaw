@@ -330,6 +330,30 @@ export function registerMcpAuthForcedEffects(fixture: McpAuthForcedEffectFixture
       }
     });
 
+    it("starts a new sign-in when a lost forced refresh fenced fresh tokens", async () => {
+      await seed();
+      const before = await stored();
+      effects.endpoint = (request, response) =>
+        request.url === "/token" && respond(response, { error: "server_error" }, 500);
+      await expect(
+        oauthCoordinator.resolveMcpOAuthAccessToken({
+          identity: identity(),
+          rejectedAccessToken: "fixture-access",
+        }),
+      ).rejects.toThrow();
+      expect(await stored()).toEqual({ ...before, refreshClaim: expect.any(String) });
+      effects.endpoint = undefined;
+      const resolve = () => oauthCoordinator.resolveMcpOAuthAccessToken({ identity: identity() });
+      await expect(resolve()).rejects.toThrow("refresh outcome is uncertain");
+
+      const started = await begin();
+      expect(await pending(started.state)).toBe(identity().storeKey);
+      expect((await callback(started.state)).status).toBe(200);
+      expect(await terminal(started.sessionId)).toMatchObject({ status: "done" });
+      expect((await stored()).refreshClaim).toBeUndefined();
+      await expect(resolve()).resolves.toBe("fixture-access");
+    });
+
     const expectPendingCleared = async (state: string) => {
       const after = await stored();
       expectAbsent(after, "codeVerifier", "lastAuthorizationUrl");

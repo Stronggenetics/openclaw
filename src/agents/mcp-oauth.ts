@@ -386,9 +386,11 @@ export async function startMcpOAuthAuthorization(
       opts.login?.assertCurrent();
       await lease.assertOwned();
       opts.login?.assertCurrent();
+      // A fenced refresh claim blocks every token use, so only a new sign-in can clear it.
       if (
         opts.login &&
         store.tokens?.access_token &&
+        !store.refreshClaim &&
         store.pendingAuthorizationChallenge?.requiresAuthorization !== true &&
         (store.tokenExpiresAt === undefined ||
           store.tokenExpiresAt > Date.now() + TOKEN_EXPIRY_SKEW_MS)

@@ -246,4 +246,30 @@ describe("real MCP SDK token HTTP and durable owner", () => {
       await outcome;
     }
   });
+
+  it("rejects a caller cancelled while another caller holds the lease", async () => {
+    seed();
+    const entered = createDeferred();
+    const release = createDeferred();
+    const fetchFn = vi.fn<typeof fetch>(async () => {
+      entered.resolve();
+      await release.promise;
+      return tokens();
+    });
+    const holder = resolveMcpOAuthAccessToken({ identity, fetchFn });
+    try {
+      await awaitGateBeforeSettlement(entered.promise, holder, "refresh settled before HTTP");
+      const controller = new AbortController();
+      const waiter = resolveMcpOAuthAccessToken({ identity, fetchFn, signal: controller.signal });
+      controller.abort();
+      // Rejects while the holder still owns the lease.
+      await expect(waiter).rejects.toMatchObject({ name: "AbortError" });
+      release.resolve();
+      await expect(holder).resolves.toBe("synthetic-new-access");
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+    } finally {
+      release.resolve();
+      await holder.catch(() => undefined);
+    }
+  });
 });
