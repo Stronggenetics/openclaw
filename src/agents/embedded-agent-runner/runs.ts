@@ -43,6 +43,7 @@ import {
   sessionTargetOwnersMatch,
   type SessionTarget,
 } from "../../sessions/session-controller.target.js";
+import { beginNativeRuntimeLivenessWait } from "../../sessions/session-controller.watchdog.js";
 import { createDeferredCore } from "../../shared/deferred.js";
 import { settlesWithin } from "../../shared/settle-within.js";
 import { SessionControllerAdmissionRequiredError } from "../harness/errors.js";
@@ -961,18 +962,15 @@ export function attachActiveEmbeddedRun(
   attachNativeAttempt(attachment);
   handle[embeddedRunCleanupAttachment] = attachment;
   if (watchdogAttempt && handle.ownsLiveness) {
-    const wait = watchdogAttempt.beginWait({
-      kind: "runtime_owned",
-      isCurrent: () => {
-        if (
-          getEmbeddedRunAttachment(handle) !== attachment ||
-          (operation && getSessionControllerEntryForOperation(operation).attachment !== attachment)
-        ) {
-          return false;
-        }
-        toolAuthority?.assertActive();
-        return handle.ownsLiveness?.() === true && !handle.isAborted?.() && !handle.isStopped?.();
-      },
+    const wait = beginNativeRuntimeLivenessWait(watchdogAttempt, () => {
+      if (
+        getEmbeddedRunAttachment(handle) !== attachment ||
+        (operation && getSessionControllerEntryForOperation(operation).attachment !== attachment)
+      ) {
+        return false;
+      }
+      toolAuthority?.assertActive();
+      return handle.ownsLiveness?.() === true && !handle.isAborted?.() && !handle.isStopped?.();
     });
     attachment.closeWatchdogWait = () => wait.close();
   }

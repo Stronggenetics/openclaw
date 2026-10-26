@@ -178,7 +178,11 @@ it("reports quiet runtime waits without scheduling abort", async () => {
     expect(abort).not.toHaveBeenCalled();
 
     runtimeOwnsLiveness = false;
+    // Releasing runtime liveness starts a fresh semantic window, not a retroactive stall.
     await vi.advanceTimersByTimeAsync(30_000);
+    expect(abort).not.toHaveBeenCalled();
+    expect(operation.watchdog.snapshot().recovery).toBeUndefined();
+    await vi.advanceTimersByTimeAsync(6 * 60_000);
     expect(recover).not.toHaveBeenCalled();
     expect(operation.watchdog.snapshot().recovery).toMatchObject({ status: "pending" });
     expect(events.filter((event) => event.type.startsWith("session.recovery."))).toEqual([]);
