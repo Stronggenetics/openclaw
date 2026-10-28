@@ -35,6 +35,7 @@ import {
   type OperationalRunInstanceRef,
 } from "../admitted-run-context.js";
 import { wrapAgentToolExecutionContext } from "../agent-tool-metadata.js";
+import type { CronManagementGrantBinding } from "../cron-creator-authority-context.js";
 import {
   captureActiveEmbeddedRunPersonalToolParticipants,
   type EmbeddedRunToolAuthorityBinding,
@@ -108,6 +109,8 @@ type GatewayToolCallerIdentity = {
   cronCreatorAuthorityGrant?: CronCreatorAuthorityGrant;
   /** Host-only native issuer retained by the current MCP grant; never serialized. */
   mintCronRequesterGrant?: (signal?: AbortSignal) => CronCreatorAuthorityGrant;
+  /** Host-only management binding retained by the current MCP grant; never serialized. */
+  cronManagementAuthority?: CronManagementGrantBinding;
   cronManagementGrant?: CronCreatorAuthorityGrant;
   /** Cron permission can end while the admitted run retains its other tools. */
   cronAuthorityCheck?: () => boolean;
@@ -160,6 +163,7 @@ type AdmittedGatewayToolCallerParams = {
   receiptAdmission?: GatewayToolCallerReceiptAdmission;
   cronAuthorityCheck?: () => boolean;
   mintCronRequesterGrant?: GatewayToolCallerIdentity["mintCronRequesterGrant"];
+  cronManagementAuthority?: GatewayToolCallerIdentity["cronManagementAuthority"];
   approvalSignals?: readonly AbortSignal[];
   agentId?: string;
   sessionKey?: string;
@@ -276,6 +280,9 @@ export function createAdmittedGatewayToolCallerIdentity(
     ...(params.approvalSignals?.length ? { approvalSignals: params.approvalSignals } : {}),
     ...(params.mintCronRequesterGrant
       ? { mintCronRequesterGrant: params.mintCronRequesterGrant }
+      : {}),
+    ...(params.cronManagementAuthority
+      ? { cronManagementAuthority: params.cronManagementAuthority }
       : {}),
     turnSourceChannel: params.turnSourceChannel,
     turnSourceLocal: params.turnSourceLocal,
@@ -640,6 +647,7 @@ export async function withGatewayToolCallerIdentity<T>(
       cronCreatorAuthorityGrant:
         identity.cronCreatorAuthorityGrant ?? inheritedOwner?.cronCreatorAuthorityGrant,
       mintCronRequesterGrant: inheritedValue("mintCronRequesterGrant"),
+      cronManagementAuthority: inheritedValue("cronManagementAuthority"),
       cronManagementGrant: identity.cronManagementGrant ?? inheritedOwner?.cronManagementGrant,
       cronAuthorityCheck: composeReceiptAuthority(
         inheritedOwner?.cronAuthorityCheck,
