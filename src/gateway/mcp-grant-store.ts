@@ -6,7 +6,6 @@ import {
 } from "../agents/admitted-run-context.js";
 import type { AuthProfileStore } from "../agents/auth-profiles/types.js";
 import type { ExecElevatedDefaults } from "../agents/bash-tools.exec-types.js";
-import type { CronManagementGrantBinding } from "../agents/cron-creator-authority-context.js";
 import type { DelegationCapability } from "../agents/delegation-capability.js";
 import type { ExecPolicyOverrides, ExecSessionDefaults } from "../agents/exec-defaults.js";
 import type { PreparedQuestionAnswerAuthority } from "../agents/harness/host-private-capabilities.js";
@@ -37,7 +36,10 @@ import type { InputProvenance } from "../sessions/input-provenance.js";
 import type { ReplyTurnParticipants } from "../sessions/session-controller.contracts.js";
 import { resolveGlobalMap } from "../shared/global-singleton.js";
 import type { SkillLibraryAuthoringCapability } from "../skills/library/authoring.js";
-import type { CronCreatorAuthorityGrant } from "./cron-creator-authority-grant.types.js";
+import type {
+  CronCreatorAuthorityGrant,
+  CronManagementGrantBinding,
+} from "./cron-creator-authority-grant.types.js";
 
 /** Set by MCP authentication; caller-token conversation headers cannot select a binding. */
 export type McpCurrentConversationOrigin = "run-bound-grant" | "server-session" | "caller-token";

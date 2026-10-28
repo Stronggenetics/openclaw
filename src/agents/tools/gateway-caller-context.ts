@@ -8,7 +8,10 @@ import {
 } from "../../config/sessions/session-source-authority.js";
 import type { SessionEntry } from "../../config/sessions/types.js";
 import type { AgentRuntimeIdentity } from "../../gateway/agent-runtime-identity-token.js";
-import type { CronCreatorAuthorityGrant } from "../../gateway/cron-creator-authority-grant.types.js";
+import type {
+  CronCreatorAuthorityGrant,
+  CronManagementGrantBinding,
+} from "../../gateway/cron-creator-authority-grant.types.js";
 import type { GatewayContextResolver } from "../../gateway/server-methods/types.js";
 import type { GatewayUiCommandTarget } from "../../gateway/ui-command-target.types.js";
 import type { WorkerSessionTurnClaim } from "../../gateway/worker-environments/placement-record.js";
@@ -35,7 +38,6 @@ import {
   type OperationalRunInstanceRef,
 } from "../admitted-run-context.js";
 import { wrapAgentToolExecutionContext } from "../agent-tool-metadata.js";
-import type { CronManagementGrantBinding } from "../cron-creator-authority-context.js";
 import {
   captureActiveEmbeddedRunPersonalToolParticipants,
   type EmbeddedRunToolAuthorityBinding,

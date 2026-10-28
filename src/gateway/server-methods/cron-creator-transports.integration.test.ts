@@ -55,7 +55,7 @@ import {
   SESSION,
   CREATOR,
   cfg as baseCfg,
-  cron,
+  cron as cronService,
   stateDir,
   admission,
   inRun,
@@ -526,7 +526,7 @@ it.each(["cli", "embedded"] as const)(
   { timeout: 30_000 },
   async (transport) => {
     // Operator-created, so the caller-scoped inventory for agent "main" hides it.
-    const otherAgentJob = await cron.add({
+    const otherAgentJob = await cronService.add({
       name: "Other agent report",
       agentId: "ops",
       enabled: true,

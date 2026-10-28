@@ -12,7 +12,10 @@ import {
   type CronCreatorAuthorityRunScope,
   type CronManagementEntitlement,
 } from "../gateway/cron-creator-authority-grant.js";
-import type { CronAuthenticatedChannelRequester } from "../gateway/cron-creator-authority-grant.types.js";
+import type {
+  CronAuthenticatedChannelRequester,
+  CronManagementGrantBinding,
+} from "../gateway/cron-creator-authority-grant.types.js";
 import {
   getAgentRunContext,
   validateAgentRunDelegatedAuthority,
@@ -247,8 +250,6 @@ export function bindCronManagementGrant(runId: string | undefined, config?: Open
   );
 }
 
-export type CronManagementGrantBinding = NonNullable<ReturnType<typeof bindCronManagementGrant>>;
-
 /**
  * Retains admitted management before a host-owned bridge (CLI MCP loopback) constructs tools
  * outside this scope. The bridge binds the run's delegated authority per request; every
@@ -267,7 +268,7 @@ function bindCronManagementScope(
   scope: CronCreatorAuthorityRunScope | undefined,
   authority: AgentRunDelegatedAuthority | undefined,
   runId: string | undefined,
-) {
+): CronManagementGrantBinding | undefined {
   if (
     !scope?.managementEntitlement ||
     !scope.active ||
